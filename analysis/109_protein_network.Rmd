@@ -1,0 +1,325 @@
+---
+title: "AD-BXD Proteome Resilience Network"
+output:
+  workflowr::wflow_html:
+    toc: true
+editor_options:
+  chunk_output_type: console
+bibliography: references.bib
+---
+
+### Loading Data
+
+Loading libraries
+
+```{r libraries}
+library("limma")
+library("qvalue")
+library("ggplot2")
+library("ggbeeswarm")
+library("ggrepel")
+library("ggtext")
+library("cowplot")
+library("cliqueR")
+library("WGCNA")
+library("tidyverse")
+library("MASS")
+library("qtl2")
+library("pcaMethods")
+library("topGO")
+source("./code/ggplot_pub_themes.R")
+```
+
+Loading proteome and genotype data.
+
+```{r load_proteome_data}
+adbxd_hippo_pgroup            = readRDS("./data/adbxd_hippo_pgroup_annotated.RDS")
+adbxd_hippo_sampanno          = readRDS("./data/adbxd_hippo_sampanno_quantnorm.RDS")
+adbxd_hippo_pgroup_annotation = readRDS("./data/adbxd_hippo_pgroup_annotation.RDS")
+adbxd_annot_list_coordinates  = readRDS("./data/adbxd_uniprot_coordinates.RDS")
+adbxd_annot_list_uniprot      = readRDS("./data/adbxd_uniprot_alldata.RDS")
+adbxd_coord_df                = readRDS("./data/adbxd_uniprot_coord_df.RDS")
+adbxd_genotypes               = readRDS("./data/bxd_geno_data.RDS")
+adbxd_geno_meta               = readRDS("./data/bxd_geno_meta.RDS")
+adbxd_5xfad_14mo_resilience   = readRDS("./data/adbxd_5xfad_14mo_resilience.RDS")
+row.names(adbxd_5xfad_14mo_resilience) = adbxd_5xfad_14mo_resilience$sample_id
+```
+
+Getting rs33539160 genotype in the sample annotation data and filtering for 14-month-old 5xFAD animals.
+
+```{r}
+adbxd_hippo_sampanno$rs33539160 = ifelse(!is.na(adbxd_hippo_sampanno$strain),
+                                         as.data.frame(t(adbxd_genotypes))[adbxd_hippo_sampanno$strain,"rs33539160"],
+                                         NA)
+adbxd_hippo_sampanno_5xfad_months14 = adbxd_hippo_sampanno |>
+  filter(age == "Months14" & genotype == "5xFAD") |>
+  mutate(rs33539160 = ifelse(rs33539160 == 1, "B6/D2","B6/B6")) |>
+  as.data.frame()
+
+adbxd_hippo_pgroup_5xfad_months14 = adbxd_hippo_pgroup[,row.names(adbxd_hippo_sampanno_5xfad_months14)]
+adbxd_hippo_pgroup_5xfad_months14 = adbxd_hippo_pgroup_5xfad_months14[which(rowSums(is.na(adbxd_hippo_pgroup_5xfad_months14)) < 0.2 * ncol(adbxd_hippo_pgroup_5xfad_months14)),]
+```
+
+
+Doing regression on resilience.
+
+```{r resilience_regression}
+adbxd_5xfad_14mo_resilience = adbxd_5xfad_14mo_resilience[colnames(adbxd_hippo_pgroup_5xfad_months14),]
+adbxd_resilience_modmat = model.matrix(~ sex + resilience,
+                                       data = adbxd_5xfad_14mo_resilience)
+
+# Running model
+adbxd_resilience_lmFit = lmFit(adbxd_hippo_pgroup_5xfad_months14, 
+                                             design = adbxd_resilience_modmat, 
+                                             method = "robust", weights = NULL)
+adbxd_resilience_lmFit = eBayes(adbxd_resilience_lmFit, trend = TRUE, robust = TRUE)
+
+# Compiling top tables
+adbxd_resilience_toptable = as.data.frame(topTable(adbxd_resilience_lmFit,
+                                               coef = grep("^resilience", colnames(adbxd_resilience_modmat)), 
+                                               number = nrow(adbxd_hippo_pgroup_5xfad_months14)))
+adbxd_resilience_toptable$qvalue = qvalue(adbxd_resilience_toptable$P.Value)$qvalues
+saveRDS(adbxd_resilience_toptable, "./data/adbxd_resilience_months14_toptable.RDS")
+```
+
+Displaying top resilience-correlated proteins.
+
+```{r resilience_proteins_q_0p10}
+adbxd_resilience_sig = adbxd_resilience_toptable |>
+  filter(qvalue < 0.10) |>
+  as.data.frame()
+```
+
+### Getting correlation tables
+
+```{r}
+adbxd_hippo_pca = pca(t(adbxd_hippo_pgroup_5xfad_months14),
+                       method = "ppca", nPcs = 4)
+adbxd_hippo_pgroup_5xfad_months14_imputed = t(adbxd_hippo_pca@completeObs)[row.names(adbxd_hippo_pgroup_5xfad_months14),colnames(adbxd_hippo_pgroup_5xfad_months14)]
+
+adbxd_cortable = bicor(t(adbxd_hippo_pgroup_5xfad_months14_imputed),
+                       use = "pairwise.complete.obs")
+adbxd_highcor = which(adbxd_cortable >= 0.4 & upper.tri(adbxd_cortable, diag = FALSE), arr.ind = TRUE)
+adbxd_highcor = data.frame(protein_1 = row.names(adbxd_cortable)[adbxd_highcor[,"row"]],
+                           protein_2 = colnames(adbxd_cortable)[adbxd_highcor[,"col"]],
+                           cor = adbxd_cortable[adbxd_highcor])
+rm(list = c("adbxd_cortable"))
+
+saveRDS(adbxd_highcor,"./data/adbxd_highcor.RDS")
+```
+
+### Running paraclique analysis
+
+First, making file with paraclique information on thresholded data
+
+```{r}
+# Getting number of nodes (vertices) and edges
+n_nodes = length(unique(c(adbxd_highcor$protein_1, adbxd_highcor$protein_2)))
+n_edges = nrow(adbxd_highcor)
+
+# Making file to write out
+adbxd_write_out_pc_cor_table = adbxd_highcor[,1:2]
+colnames(adbxd_write_out_pc_cor_table) = c(n_nodes, n_edges)
+write.table(adbxd_write_out_pc_cor_table, "./data/adbxd_paraclique_data.el", sep = " ", quote = FALSE, row.names = FALSE, col.names = TRUE)
+
+# Getting paracliques (minimum clique size = 5, minimum paraclique size = 10, glom factor = 0.2)
+# Note: this is not the traditional glom factor. 
+# Instead, it is the proportion of edges that each added node must have to the total number of nodes.
+clique_min = 5
+paraclique_min = 10
+glom_factor = 0.2 
+adbxd_paracliques = cliqueR.paraclique(filename = "./data/adbxd_paraclique_data.el", 
+                                       igf = glom_factor, min_mc_size = clique_min, min_pc_size = paraclique_min)
+
+# Getting eigenvalues for paracliques
+for (i in seq_len(length(adbxd_paracliques))) {
+  genes_i = adbxd_paracliques[[i]]
+  clique_mat_i = t(adbxd_hippo_pgroup_5xfad_months14_imputed[genes_i,])
+  clique_mat_i = clique_mat_i[which(rowSums(is.na(clique_mat_i)) == 0),]
+  eigengene_i = prcomp(clique_mat_i, scale = TRUE, center = TRUE)$x[,1]
+  if (i != 1) {
+    adbxd_paraclique_eigengenes[,paste("PCE",i,sep="")] = eigengene_i[adbxd_paraclique_eigengenes$SubjectID]
+  } else {
+    adbxd_paraclique_eigengenes = data.frame(row.names = names(eigengene_i),
+                                             SubjectID = as.character(names(eigengene_i)),
+                                             PCE1 = eigengene_i,
+                                             stringsAsFactors = FALSE)
+  }
+}
+```
+
+Showing lengths of paracliques
+
+```{r paraclique_lengths}
+lengths(adbxd_paracliques)
+```
+
+The paracliques range in length from `r min(lengths(adbxd_paracliques))` to `r max(lengths(adbxd_paracliques))`.
+
+Next, evaluating paracliques for significance with respect to resilience analyses.
+
+```{r}
+adbxd_paraclique_significance = data.frame(matrix(nrow = (ncol(adbxd_paraclique_eigengenes) - 1), ncol = 4))
+row.names(adbxd_paraclique_significance) = colnames(adbxd_paraclique_eigengenes)[-1]
+colnames(adbxd_paraclique_significance) = c("paraclique",
+                                            "n_proteins",
+                                            "resilience_bicor",
+                                            "resilience_bicor_p")
+adbxd_paraclique_significance$paraclique = colnames(adbxd_paraclique_eigengenes)[-1]
+
+for (i in seq_len(nrow(adbxd_paraclique_significance))) {
+  paraclique_i = adbxd_paraclique_significance[i,"paraclique"]
+  adbxd_paraclique_significance[i,"n_proteins"] = length(adbxd_paracliques[[as.numeric(gsub("^PCE","",paraclique_i))]])
+  bicor_i = bicorAndPvalue(adbxd_paraclique_eigengenes[,paraclique_i],
+                                                         adbxd_5xfad_14mo_resilience[row.names(adbxd_paraclique_eigengenes),"resilience"],
+                                                         use = "pairwise.complete.obs")
+  adbxd_paraclique_significance[i,"resilience_bicor"] = bicor_i$bicor[1,1]
+    adbxd_paraclique_significance[i,"resilience_bicor_p"] = bicor_i$p[1,1]
+}
+
+adbxd_paraclique_significance$resilience_bicor_q = qvalue(adbxd_paraclique_significance$resilience_bicor_p)$qvalues
+saveRDS(adbxd_paraclique_significance, "./data/adbxd_paraclique_significance.RDS")
+```
+
+Displaying significant paracliques
+
+```{r significant_paracliques}
+adbxd_paraclique_significance |>
+  filter(resilience_bicor_q < 0.10)
+```
+
+Finding correlations between PCE9 proteins and resilience.
+
+```{r}
+PCE9_cors = bicor(adbxd_5xfad_14mo_resilience$resilience,
+                  t(adbxd_hippo_pgroup_5xfad_months14)[row.names(adbxd_5xfad_14mo_resilience),adbxd_paracliques[[9]]],
+                  use = "pairwise.complete.obs")
+PCE9_cors[,which(abs(PCE9_cors) > 0.2)]
+```
+
+Finding correlations between PCE16 proteins and resilience.
+
+```{r}
+PCE16_cors = bicor(adbxd_5xfad_14mo_resilience$resilience,
+                  t(adbxd_hippo_pgroup_5xfad_months14)[row.names(adbxd_5xfad_14mo_resilience),adbxd_paracliques[[16]]],
+                  use = "pairwise.complete.obs")
+PCE16_cors[,which(abs(PCE16_cors) > 0.2)]
+```
+
+Finding correlations between PCE20 proteins and resilience.
+
+```{r}
+PCE20_cors = bicor(adbxd_5xfad_14mo_resilience$resilience,
+                  t(adbxd_hippo_pgroup_5xfad_months14)[row.names(adbxd_5xfad_14mo_resilience),adbxd_paracliques[[20]]],
+                  use = "pairwise.complete.obs")
+PCE20_cors[,which(abs(PCE20_cors) > 0.2)]
+```
+
+Finding correlations between PCE21 proteins and resilience.
+
+```{r}
+PCE21_cors = bicor(adbxd_5xfad_14mo_resilience$resilience,
+                  t(adbxd_hippo_pgroup_5xfad_months14)[row.names(adbxd_5xfad_14mo_resilience),adbxd_paracliques[[21]]],
+                  use = "pairwise.complete.obs")
+PCE21_cors[,which(abs(PCE21_cors) > 0.2)]
+```
+
+Getting PCE6 GO BP data from AMIGO (enrichment analysis performed 2023-08-25).
+
+```{r get_gobp_table}
+GO_files = list.files(path = "./data/GO/", pattern = "BON_NEW")
+
+for (i in GO_files) {
+  lines_i = readLines(paste0("./data/GO/",i))
+  skip_i = grep("^PANTHER GO-Slim", lines_i) - 1
+  table_i = read.table(paste0("./data/GO/",i), 
+                              skip = skip_i, sep = "\t", 
+                              header = TRUE) |>
+    janitor::clean_names() |>
+    mutate(go_analysis = gsub("^BON_NEW_(.*)\\.txt$","\\1",i))
+  colnames(table_i) = gsub("_\\d+$","",colnames(table_i))
+  if (i == GO_files[1]) {
+    go_table = table_i
+  } else {
+    go_table = rbind(go_table, table_i)
+  }
+}
+
+go_table
+```
+
+Doing GO semantic similarity analysis of terms in this list.
+
+```{r gosemsim_pce6_gobp_table}
+library("GOSemSim")
+library("MASS")
+library("dynamicTreeCut")
+source("./code/ggplot_pub_themes.R")
+
+mmGO = godata("org.Mm.eg.db", ont="BP")
+
+go_table$go_term = gsub("^.*\\((GO:\\d+)\\)","\\1", go_table$panther_go_slim_biological_process)
+GO_BP_table = go_table[which(go_table$client_text_box_input_over_under == "+"),]
+GO_BP_terms = unique(GO_BP_table$go_term)
+GO_BP_sim = matrix(goSim(GO_BP_terms, GO_BP_terms, 
+                         semData = mmGO, measure = "Wang"),
+                   nrow = length(GO_BP_terms), 
+                   dimnames = list(GO_BP_terms, GO_BP_terms))
+
+GO_BP_MDS = isoMDS(as.dist(1 - GO_BP_sim))
+GO_BP_MDS_df = as.data.frame(GO_BP_MDS)
+colnames(GO_BP_MDS_df) = c("Dim1","Dim2","stress")
+GO_BP_MDS_df = cbind(GO_BP_table,
+                     GO_BP_MDS_df[GO_BP_table$go_term,])
+colnames(GO_BP_MDS_df) = gsub("^client_text_box_input","list",colnames(GO_BP_MDS_df))
+
+GO_BP_MDS_df$list_fold_enrichment_numeric = as.numeric(gsub("^ > ","",GO_BP_MDS_df$list_fold_enrichment))
+GO_BP_MDS_df$label = ifelse(GO_BP_MDS_df$list_fold_enrichment_numeric > 10,
+                            gsub("^(.*) \\(GO:\\d+\\)$","\\1", GO_BP_MDS_df$panther_go_slim_biological_process),
+                            NA)
+
+GO_BP_MDS_hclust = hclust(as.dist(1 - GO_BP_sim))
+GO_BP_MDS_cluster = paste0("c",cutreeDynamicTree(GO_BP_MDS_hclust, minModuleSize = 10))
+names(GO_BP_MDS_cluster) = GO_BP_MDS_hclust$labels
+GO_BP_MDS_order = GO_BP_MDS_hclust$order
+names(GO_BP_MDS_order) = GO_BP_MDS_hclust$labels
+GO_BP_MDS_df$cluster = GO_BP_MDS_cluster[GO_BP_MDS_df$go_term]
+GO_BP_MDS_df = GO_BP_MDS_df |>
+  group_by(cluster, go_analysis) |>
+  mutate(label_2 = order(list_fold_enrichment_numeric, decreasing = TRUE),
+         label_2 = ifelse(label_2 == 1,
+                          gsub("^(.*) \\(GO:\\d+\\)$","\\1",panther_go_slim_biological_process),
+                          NA),
+         go_analysis = factor(go_analysis, levels = c("PCE9","PCE16","PCE20","PCE21"), ordered = TRUE))
+
+GO_BP_MDS_plot = ggplot(data = GO_BP_MDS_df, aes(x = Dim1, 
+                                                 y = Dim2,
+                                                 size = list_fold_enrichment_numeric,
+                                                 label = label_2, 
+                                                 fill = cluster)) +
+  geom_point(shape = 21) +
+  geom_label_repel(aes(color = cluster), size = 1.5, fill = "#FFFFFF") +
+  # scale_fill_viridis_c(name = "fold-change", option = "B") +
+  scale_size_continuous(name = "fold-change") +
+  facet_wrap(. ~ go_analysis, ncol = 2) +
+  xlab("Dimension 1") +
+  ylab("Dimension 2") +
+  theme_bw() +
+  pubtheme_bw +
+  theme(legend.position = "bottom") +
+  guides(fill = "none", color = "none")
+
+ggsave("./output/figure_4.pdf", GO_BP_MDS_plot,
+       width = 174, height = 114, units = "mm")
+
+GO_BP_MDS_plot
+```
+
+Next, writing out paraclique data.
+
+```{r}
+saveRDS(adbxd_paraclique_eigengenes, "./data/adbxd_paraclique_eigengenes.RDS")
+saveRDS(adbxd_paracliques, "./data/adbxd_paracliques.RDS")
+saveRDS(adbxd_paraclique_significance, "./data/adbxd_paracliques_significance.RDS")
+```
+

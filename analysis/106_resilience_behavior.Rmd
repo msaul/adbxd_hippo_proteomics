@@ -1,0 +1,457 @@
+---
+title: "AD-BXD Resilience Analysis"
+output:
+  workflowr::wflow_html:
+    toc: true
+editor_options:
+  chunk_output_type: console
+bibliography: references.bib
+---
+
+### Loading Data
+
+Loading libraries
+
+```{r libraries}
+library("limma")
+library("ggplot2")
+library("tidyverse")
+library("MASS")
+library("qtl2")
+```
+
+Loading data.
+
+```{r load_data}
+adbxd_hippo_sampanno = readRDS("./data/adbxd_hippo_sampanno_all.RDS")
+bxd_geno_data        = readRDS("./data/bxd_geno_data.RDS")
+bxd_geno_meta        = readRDS("./data/bxd_geno_meta.RDS")
+```
+
+#### Calculating Behavioral Measure for Cognitive Resilience
+
+```{r}
+adbxd_5xfad_regression = adbxd_hippo_sampanno |>
+  filter(condition != "Hippocampus reference pool" & condition != "Mouse brain reference pool") |>
+  group_by(strain, age) |>
+  mutate(cfm_arcsine = asin(sqrt(cfm_term / 100))) |>
+  mutate(cfm_mean_Ntg = mean(cfm_arcsine[which(genotype == "Ntg")])) |>
+  filter(genotype == "5xFAD" & !is.na(cfm_mean_Ntg)) |>
+  dplyr::select(sample_id, contract, batch, strain, sex, age, genotype, cfm_term, cfm_arcsine, cfm_mean_Ntg) |>
+  ungroup() |>
+  group_by(strain, age) |>
+  mutate(n = length(cfm_arcsine)) |>
+  ungroup() |>
+  as.data.frame()
+```
+
+Calculating heritability of resilience score
+
+```{r h2_resilience_score}
+library("MASS")
+adbxd_5xfad_h2_df_14mo = adbxd_5xfad_regression |>
+  filter(age == "Months14") |>
+  mutate(obsweight = 1 / n) |>
+  as.data.frame()
+cfm_term_lm = lm(cfm_arcsine ~ cfm_mean_Ntg,
+                 weight = obsweight,
+                 data = adbxd_5xfad_h2_df_14mo)
+summary(cfm_term_lm)
+```
+
+Now calculating heritability.
+
+```{r calculate_resilience_h2}
+adbxd_5xfad_h2_df_14mo$resilience = stdres(cfm_term_lm)
+resilience_lm = lm(resilience ~ strain, data = adbxd_5xfad_h2_df_14mo[which(adbxd_5xfad_h2_df_14mo$n >= 2),])
+resilience_h2_raw = summary(resilience_lm)$r.squared
+n_per_strain = mean(adbxd_5xfad_h2_df_14mo[which(adbxd_5xfad_h2_df_14mo$n >= 2),"n"])
+resilience_h2_ri = resilience_h2_raw / (resilience_h2_raw + ((1 - resilience_h2_raw) / n_per_strain))
+
+cat("The raw heritability is ", round(resilience_h2_raw, 3), 
+    " and the strain mean heritability is ", round(resilience_h2_ri, 3),
+    " for the residuals-based resilience measure in 14 months aged 5xFAD mice.", sep = "")
+```
+
+Saving the resilience data
+
+```{r}
+saveRDS(adbxd_5xfad_h2_df_14mo, "./data/adbxd_5xfad_14mo_resilience.RDS")
+```
+
+Plotting the regression line.
+
+```{r}
+conf_interval_vector = data.frame(cfm_mean_Ntg = seq(from = min(adbxd_5xfad_h2_df_14mo$cfm_mean_Ntg), 
+                                                     to = max(adbxd_5xfad_h2_df_14mo$cfm_mean_Ntg), 
+                                                     by = 0.01))
+cfm_term_lm_conf = predict(cfm_term_lm,
+                           newdata = conf_interval_vector,
+                           interval = "confidence", level = 0.95)
+conf_interval_df = cbind(conf_interval_vector, cfm_term_lm_conf) |>
+  mutate(cfm_mean_Ntg_back = 100 * (sin(cfm_mean_Ntg)) ^ 2,
+         fit_back = 100 * (sin(fit)) ^ 2,
+         lwr_back = 100 * (sin(lwr)) ^ 2,
+         upr_back = 100 * (sin(upr)) ^ 2) |>
+  as.data.frame()
+
+adbxd_5xfad_h2_df_14mo = adbxd_5xfad_h2_df_14mo |>
+  mutate(cfm_mean_Ntg_back = 100 * (sin(cfm_mean_Ntg)) ^ 2) |>
+  as.data.frame()
+resilience_regression_plot = ggplot(data = adbxd_5xfad_h2_df_14mo, 
+                                    aes(x = cfm_mean_Ntg_back, 
+                                        y = cfm_term, 
+                                        size = obsweight)) + 
+  geom_point(shape = 19, color = "#CC3333", alpha = 0.35) + 
+  geom_line(data = conf_interval_df, 
+            aes(x = cfm_mean_Ntg_back, y = fit_back),
+            color = "#CC3333", size = 1) +
+    geom_line(data = conf_interval_df, 
+            aes(x = cfm_mean_Ntg_back, y = lwr_back),
+            color = "#CC3333", size = 0.5, linetype = "dashed") +
+      geom_line(data = conf_interval_df, 
+            aes(x = cfm_mean_Ntg_back, y = upr_back),
+            color = "#CC3333", size = 0.5, linetype = "dashed") +
+  geom_abline(intercept = 0, slope = 1, linetype = "dotted", size = 0.5) + 
+  theme_bw() + 
+  theme(panel.grid = element_line(color = "#FFFFFF"),
+        legend.position = "bottom") +
+  scale_size_continuous(name = "Weight", range = c(1,3)) +
+  xlab("Mean Ntg 14-month CFM") +
+  ylab("5xFAD 14-month CFM")
+resilience_regression_plot
+```
+
+Plotting resilience score
+
+```{r}
+adbxd_5xfad_h2_df_14mo_strain_mean = adbxd_5xfad_h2_df_14mo |>
+  group_by(strain) |>
+  summarize(mean = mean(resilience),
+            sd = sd(resilience), 
+            n = length(resilience),
+            cfm_mean = mean(cfm_arcsine),
+            ntg_mean = mean(cfm_mean_Ntg)) |>
+  mutate(sem = sd / sqrt(n),
+         ul = mean + sem,
+         ll = mean - sem) |>
+  arrange(mean) |>
+  mutate(is_bxd = gsub("^BXD.*$","BXD",strain) == "BXD",
+         strain = factor(strain, levels = strain, ordered = TRUE)) |>
+  mutate(straintype = ifelse(is_bxd, "BXD", as.character(strain)))
+
+adbxd_5xfad_h2_df_14mo_strainplot = ggplot(data = adbxd_5xfad_h2_df_14mo_strain_mean, 
+                                             aes(x = strain, 
+                                                 y = mean,
+                                                 fill = straintype)) +
+  geom_col(color = "#000000") +
+  geom_errorbar(aes(ymin = ll, ymax = ul), width = 0.5) +
+  xlab("BXD Strain") +
+  ylab("Resilience Score\n(Higher = More Resilient)") +
+  theme_bw() +
+  scale_fill_manual(values = c("#CC3333","#444444","#CCCCCC")) +
+  theme(panel.grid = element_line(color = "#FFFFFF"),
+        axis.text.x = element_text(angle = 45,
+                                   vjust = 1,
+                                   hjust = 1),
+        legend.position = "none")
+adbxd_5xfad_h2_df_14mo_strainplot
+```
+
+### Mapping 5xFAD 14 month female resilience
+
+##### Rank-Normal Function
+
+We need a normal rank transformation function that can handle `NA` values from the following formula:
+
+$Y^t_i={\phi}^{-1}({{r_i-c}\over{N-2c+1}})$
+
+where $r_i$ is the rank, $N$ is the number of ranked samples, $\phi^{-1}$ is the inverse normal function (equivalent to `qnorm()` in R). A recommended value of $c=3/8$ in [Beasley and Erickson, 2010](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2921808/), but we use the [van der Waerden (1952)](https://scholar.google.com/scholar_lookup?journal=Proc+Koninklijke+Nederlandse+Akademie+van+Wetenschappen&title=Order+tests+for+the+two-sample+problem+and+their+power&author=BL+van+der+Waerden&volume=55&publication_year=1952&pages=453-458&) value of $c=0$ per Vivek Philip.
+
+Beasley and Erickson's sample size recommendation is that we need a sample of hundreds to use this function. We will attempt this with approx. 30.
+
+```{r norm_rank_transform}
+norm_rank_transform = function(x, c = 0) {
+  stopifnot(is.numeric(x) & is.vector(x))
+  x_noNA = which(!is.na(x))
+  N = length(x_noNA)
+  x[x_noNA] = qnorm((rank(x[x_noNA], ties.method = "average") - c) / (N - (2 * c) + 1))
+  return(x)
+}
+```
+
+##### Mapping Resilience
+
+```{r map_5xfad_14month_female_resilience}
+source("./code/gemma_bxd.R")
+# Making genotype matrix
+
+adbxd_5xfad_14mo_mapping = adbxd_5xfad_h2_df_14mo_strain_mean |>
+  as.data.frame()
+adbxd_genodata = cbind(data.frame(id = row.names(bxd_geno_data),
+                                  x = rep("X", times = nrow(bxd_geno_data)),
+                                  y = rep("Y", times = nrow(bxd_geno_data))),
+                       bxd_geno_data[,as.character(adbxd_5xfad_14mo_mapping$strain)])
+
+# Making annotation
+adbxd_geno_annot = bxd_geno_meta
+adbxd_geno_annot["14P_no_data","Mb_mm39"] = 3.000000
+adbxd_geno_annot$id = row.names(adbxd_geno_annot)
+adbxd_geno_annot$pos = adbxd_geno_annot$Mb_mm39 * 1e6
+adbxd_geno_annot = adbxd_geno_annot[,c("id","pos","Chr")]
+resilience_gemma = gemma_bxd(pheno = norm_rank_transform(adbxd_5xfad_14mo_mapping$mean),
+                             geno = adbxd_genodata,
+                             anno = adbxd_geno_annot,
+                             perms = 100)
+resilience_gemma_plot = plot_gemma_bxd(resilience_gemma, threshold = 0.95,
+                                       genome_build = "GRCm39 Physical Coordinates") + 
+  geom_hline(yintercept = resilience_gemma$gemma_perms |> 
+               group_by(permu) |> 
+               summarize(maxlod = max(lod)) |> 
+               pull(maxlod) |> 
+               quantile(probs = 1 - 0.63), 
+             color = "#222222", 
+             linetype = "dotted")
+resilience_gemma_plot
+```
+
+Mapping the same phenotype with `R/qtl2`. Analysis inspired by the [vignette from Karl Broman from CTC 2019](https://github.com/kbroman/Teaching_CTC2019/blob/master/CTC2019_tutorial.Rmd).
+
+```{r resilience_r_qtl2}
+# Getting BXD cross data
+bxd_cross_url = "https://raw.githubusercontent.com/rqtl/qtl2data/master/BXD/bxd.zip"
+bxd_cross = read_cross2(bxd_cross_url)
+
+# Calculating pseudomarkers and genoprobs
+gmap = insert_pseudomarkers(bxd_cross$gmap, step=0.2, stepwidth="max")
+pmap = interp_map(gmap, bxd_cross$gmap, bxd_cross$pmap)
+pr = calc_genoprob(bxd_cross, gmap, error_prob=0.002, map_function="c-f")
+
+# Calculating kinship with LOCO
+k = calc_kinship(pr, "loco")
+
+# Getting resilience phenotype
+pheno = norm_rank_transform(adbxd_5xfad_14mo_mapping$mean)
+names(pheno) = as.character(adbxd_5xfad_14mo_mapping$strain)
+
+# Mapping resilience and doing permutations
+out = scan1(pr, pheno, k)
+n_perms = 1000
+perms = scan1perm(pr, pheno, k, n_perm = n_perms)
+
+# Plotting permutations
+par(mar=c(5.1, 4.1, 0.6, 0.6))
+plot_scan1(out, pmap)
+abline(h = quantile(perms, 0.95))
+```
+
+We get the same result whether we use `GEMMA` or `R/qtl2`. Finding the peak location and 99% CI (in GRCm39 coordinate space).
+
+```{r find_peak_qtl2}
+library("rtracklayer")
+library("liftOver")
+
+chr8_peak = find_peaks(out, pmap, threshold = 4, prob = 0.99)
+chr8_peak_granges_mm10 = GRanges(seqnames = rep(paste0("chr",chr8_peak$chr), times = 3), ranges = IRanges(start = c(chr8_peak$ci_lo, chr8_peak$pos, chr8_peak$ci_hi) * 1e6, width = c(1,1)))
+names(chr8_peak_granges_mm10) = c("ci_lo","peak","ci_hi")
+
+mm10_to_mm39_chain = import.chain("./data/raw/mm10ToMm39.over.chain")
+chr8_peak_granges_mm39 = unlist(liftOver(chr8_peak_granges_mm10,
+                                         chain = mm10_to_mm39_chain))
+chr8_peak_mm39 = as.data.frame(chr8_peak_granges_mm39)
+
+cat("The peak occurs at ", unique(as.character(chr8_peak_mm39$seqnames)), ":", chr8_peak_mm39["peak","start"])
+cat("The 99% CI for the chr8 peak in GRCm39 coordinates spans ", unique(as.character(chr8_peak_mm39$seqnames)),":",chr8_peak_mm39["ci_lo","start"],"-",chr8_peak_mm39["ci_hi","start"],
+    sep = "")
+```
+
+The chr8 peak has an empirical FDR of `r (1 + length(which(perms >= chr8_peak[1,"lod"]))) / n_perms`.
+
+Checking to see if we would've gotten the same result by mapping the `asin(sqrt())` transforms of 5xFAD and Ntg CFM.
+
+Starting with Ntg.
+
+```{r plot_ntg_cfm_mapping}
+adbxd_ntg_14mo_cfm = adbxd_hippo_sampanno |>
+  filter(condition != "Hippocampus reference pool" & 
+         condition != "Mouse brain reference pool") |>
+  mutate(cfm_arcsine = asin(sqrt(cfm_term / 100))) |>
+  dplyr::select(sample_id, contract,  batch, 
+                strain, sex, age, genotype, 
+                cfm_term, cfm_arcsine) |>
+  filter(age == "Months14" & 
+         genotype == "Ntg" & 
+         !(strain %in% c("C57BL/6J","DBA/2J"))) |>
+  group_by(strain) |>
+  summarize(mean = mean(cfm_arcsine, na.rm = TRUE),
+            sd = sd(cfm_arcsine, na.rm = TRUE),
+            n = length(which(!is.na(cfm_arcsine)))) |>
+  mutate(sem = sd / sqrt(n), 
+         ll = mean - sem,
+         ul = mean + sem)
+adbxd_ntg_genodata = cbind(data.frame(id = row.names(bxd_geno_data),
+                                      x = rep("X", times = nrow(bxd_geno_data)),
+                                      y = rep("Y", times = nrow(bxd_geno_data))),
+                           bxd_geno_data[,as.character(adbxd_ntg_14mo_cfm$strain)])
+
+cfm_ntg_gemma = gemma_bxd(pheno = norm_rank_transform(adbxd_ntg_14mo_cfm$mean),
+                             geno = adbxd_ntg_genodata,
+                             anno = adbxd_geno_annot,
+                             perms = 100)
+cfm_ntg_gemma_plot = plot_gemma_bxd(cfm_ntg_gemma, threshold = 0.95,
+                                      colors = c("#444455","#444455"),
+                                      genome_build = "GRCm39 Physical Coordinates") + 
+  geom_hline(yintercept = cfm_ntg_gemma$gemma_perms |> 
+               group_by(permu) |> 
+               summarize(maxlod = max(lod)) |> 
+               pull(maxlod) |> 
+               quantile(probs = 1 - 0.63), 
+             color = "#222222", 
+             linetype = "dotted")
+cfm_ntg_gemma_plot
+```
+
+Doing the same for 5xFAD.
+
+```{r plot_5xfad_cfm_mapping}
+adbxd_5xfad_14mo_cfm = adbxd_hippo_sampanno |>
+  filter(condition != "Hippocampus reference pool" & 
+         condition != "Mouse brain reference pool") |>
+  mutate(cfm_arcsine = asin(sqrt(cfm_term / 100))) |>
+  dplyr::select(sample_id, contract,  batch, 
+                strain, sex, age, genotype, 
+                cfm_term, cfm_arcsine) |>
+  filter(age == "Months14" & 
+         genotype == "5xFAD" & 
+         !(strain %in% c("C57BL/6J","DBA/2J"))) |>
+  group_by(strain) |>
+  summarize(mean = mean(cfm_arcsine, na.rm = TRUE),
+            sd = sd(cfm_arcsine, na.rm = TRUE),
+            n = length(which(!is.na(cfm_arcsine)))) |>
+  mutate(sem = sd / sqrt(n), 
+         ll = mean - sem,
+         ul = mean + sem)
+adbxd_5xfad_genodata = cbind(data.frame(id = row.names(bxd_geno_data),
+                                      x = rep("X", times = nrow(bxd_geno_data)),
+                                      y = rep("Y", times = nrow(bxd_geno_data))),
+                           bxd_geno_data[,as.character(adbxd_5xfad_14mo_cfm$strain)])
+
+cfm_5xfad_gemma = gemma_bxd(pheno = norm_rank_transform(adbxd_5xfad_14mo_cfm$mean),
+                             geno = adbxd_5xfad_genodata,
+                             anno = adbxd_geno_annot,
+                             perms = 100)
+cfm_5xfad_gemma_plot = plot_gemma_bxd(cfm_5xfad_gemma, threshold = 0.95, 
+                                      colors = c("#CC3333","#CC3333"),
+                                      genome_build = "GRCm39 Physical Coordinates") + 
+  geom_hline(yintercept = cfm_5xfad_gemma$gemma_perms |> 
+               group_by(permu) |> 
+               summarize(maxlod = max(lod)) |> 
+               pull(maxlod) |> 
+               quantile(probs = 1 - 0.63), 
+             color = "#222222", 
+             linetype = "dotted")
+cfm_5xfad_gemma_plot
+```
+
+Doing 5xFAD genotype by BXD genotype interaction mapping
+
+```{r plot_interact_cfm_mapping}
+adbxd_14mo_cfm = adbxd_hippo_sampanno |>
+  filter(condition != "Hippocampus reference pool" & 
+         condition != "Mouse brain reference pool") |>
+  mutate(cfm_arcsine = asin(sqrt(cfm_term / 100))) |>
+  dplyr::select(sample_id, contract,  batch, 
+                strain, sex, age, genotype, 
+                cfm_term, cfm_arcsine) |>
+  filter(age == "Months14" & 
+         !(strain %in% c("C57BL/6J","DBA/2J"))) |>
+  group_by(strain, genotype) |>
+  summarize(mean = mean(cfm_arcsine, na.rm = TRUE),
+            sd = sd(cfm_arcsine, na.rm = TRUE),
+            n = length(which(!is.na(cfm_arcsine)))) |>
+  mutate(sem = sd / sqrt(n), 
+         ll = mean - sem,
+         ul = mean + sem) |>
+  as.data.frame()
+
+adbxd_inter_genodata = cbind(data.frame(id = row.names(bxd_geno_data),
+                                      x = rep("X", times = nrow(bxd_geno_data)),
+                                      y = rep("Y", times = nrow(bxd_geno_data))),
+                           bxd_geno_data[,as.character(adbxd_14mo_cfm$strain)])
+
+cfm_inter_gemma = gemma_bxd(pheno = adbxd_14mo_cfm$mean,
+                             geno = adbxd_inter_genodata,
+                             anno = adbxd_geno_annot,
+                            gxe = ifelse(adbxd_14mo_cfm$genotype == "5xFAD", 1, 0),
+                            loco = FALSE,
+                             perms = 100)
+cfm_inter_gemma_plot = plot_gemma_bxd(cfm_inter_gemma, threshold = 0.95) +
+  geom_hline(yintercept = cfm_inter_gemma$gemma_perms |> 
+               group_by(permu) |> 
+               summarize(maxlod = max(lod)) |> 
+               pull(maxlod) |> 
+               quantile(probs = 1 - 0.63), 
+             color = "#222222", 
+             linetype = "dotted")
+cfm_inter_gemma_plot
+```
+
+Showing the top marker on chr8.
+
+```{r}
+library("ggbeeswarm")
+adbxd_5xfad_14mo_mapping$rs33539160 = ifelse(as.character(adbxd_genodata["rs33539160",as.character(adbxd_5xfad_14mo_mapping$strain)]) == 0, "B6/B6", "B6/D2")
+rs33539160_plot = ggplot(data = adbxd_5xfad_14mo_mapping, 
+       aes(x = rs33539160, 
+           y = mean, 
+           color = rs33539160)) + 
+  geom_boxplot(outlier.shape = NA) + 
+  geom_beeswarm() +
+  theme_bw() +
+  theme(panel.grid = element_line(color = "#FFFFFF"),
+        legend.position = "bottom") +
+  scale_color_manual(values = c("#000000","#999999")) +
+  ylab("Strain Mean Resilience Score")
+rs33539160_plot
+```
+
+Making a figure of the results.
+
+```{r figure_1}
+library("cowplot")
+source("./code/ggplot_pub_themes.R")
+top_row = plot_grid(resilience_regression_plot + 
+                      pubtheme_bw +
+                      theme(legend.position = "bottom"), 
+                    adbxd_5xfad_h2_df_14mo_strainplot + 
+                      pubtheme_bw + 
+                      theme(legend.position = "none",
+                            axis.text.x = element_text(angle = 45,
+                                                       vjust = 1,
+                                                       hjust = 1)), 
+                    labels = c("A","B"), 
+                    label_size = 12, ncol = 2, 
+                    rel_widths = c(1,1.75),
+                    align = "h", axis = "b")
+# top_row
+bottom_rows = plot_grid(resilience_gemma_plot + 
+                          xlab(NULL) + 
+                          pubtheme_bw + 
+                          theme(legend.position = "none"),
+                        cfm_ntg_gemma_plot + 
+                          xlab(NULL) + 
+                          pubtheme_bw + 
+                          theme(legend.position = "none"),
+                        cfm_5xfad_gemma_plot + 
+                          pubtheme_bw + 
+                          theme(legend.position = "none"),
+                        labels = c("C","D","E"),
+                        label_size = 12, nrow = 3,
+                        rel_heights = c(1.5,1,1),
+                        align = "v", axis = "b")
+# bottom_rows
+figure_1 = plot_grid(top_row, bottom_rows, nrow = 2, rel_heights = c(1,2))
+figure_1
+saveRDS(figure_1, "./data/figure_1.RDS")
+ggsave("./output/figure_1.pdf", figure_1, width = 174, height = 174, units = "mm")
+```

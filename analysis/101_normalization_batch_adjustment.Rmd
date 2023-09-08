@@ -1,0 +1,239 @@
+---
+title: "Data Visualization and Batch Correction"
+output:
+  workflowr::wflow_html:
+    toc: true
+editor_options:
+  chunk_output_type: console
+bibliography: references.bib
+---
+
+The previous step is [basic data wrangling](100_basic_data_wrangling.html).
+
+### Proteome Preparation Pipeline Summary
+
+The pipeline to summarize the proteomics data is below:
+
+1.  Import raw peptide values.
+
+2.  log~2~-transform and quantile normalize peptide data.
+
+3.  Run Loess fitting on peptides within each batch against run order to correct for within-batch signal drift.
+
+4.  Summarize peptides to protein group level (using your script).
+
+5.  Filter out protein groups with \> 80% missing values.
+
+6.  Run Bayesian PCA to impute missing values (needed because some batches have no non-missing samples).
+
+7.  Use ComBat to correct for batch effects.
+
+8.  Exclude imputed data from the batch corrected protein group dataset.
+
+### Hippocampus Proteome Visualization
+
+Loading in clean data.
+
+```{r load_hippo_proteome}
+adbxd_hippo_sampanno     = readRDS("./data/adbxd_hippo_sampanno_all.RDS")
+adbxd_peptides_raw       = readRDS("./data/adbxd_hippo_peptides_raw.RDS")
+adbxd_proteins_raw       = read.table("./data/big_report.elib.proteins.txt", sep = "\t", header = TRUE)
+adbxd_peptides_annot     = readRDS("./data/adbxd_hippo_peptide_annot_raw.RDS")
+```
+
+Preparing v1.4.10 proteins
+
+```{r proteins_prep}
+adbxd_proteins_raw_annot = adbxd_proteins_raw[,1:3]
+adbxd_proteins_raw_annot$UniProt = gsub("^.*\\|(.*)\\|.*_MOUSE$","\\1",adbxd_proteins_raw_annot$Protein)
+row.names(adbxd_proteins_raw_annot) = adbxd_proteins_raw_annot$UniProt
+adbxd_proteins_raw = as.matrix(adbxd_proteins_raw[,4:ncol(adbxd_proteins_raw)])
+row.names(adbxd_proteins_raw) = adbxd_proteins_raw_annot$UniProt
+adbxd_hippo_sampanno = as.data.frame(adbxd_hippo_sampanno)
+row.names(adbxd_hippo_sampanno) = paste0("X", gsub("-",".",adbxd_hippo_sampanno$mzML_filename))
+adbxd_proteins_raw = adbxd_proteins_raw[,row.names(adbxd_hippo_sampanno)]
+colnames(adbxd_proteins_raw) = adbxd_hippo_sampanno$sample_id
+```
+
+Preparing peptides for protein group level summarization.
+
+```{r prepare_peptides_hippo_prot_grp}
+# row.names(adbxd_peptides_raw) = gsub("^(.*;.*);(\\w{2}\\|.*\\|.*)$","\\1@\\2",row.names(adbxd_peptides_raw))
+```
+
+Calling `proBatch` library and getting order of samples.
+
+```{r}
+library("proBatch")
+library("ggplot2")
+library("tidyverse")
+adbxd_hippo_sampanno = as.data.frame(adbxd_hippo_sampanno)
+row.names(adbxd_hippo_sampanno) = adbxd_hippo_sampanno$sample_id
+adbxd_hippo_sampanno$FullRunName = adbxd_hippo_sampanno$sample_id
+adbxd_hippo_sampanno$run_order = rank(adbxd_hippo_sampanno$creation_date)
+
+c1_samples = adbxd_hippo_sampanno[which(adbxd_hippo_sampanno$contract == "C1"),"sample_id"]
+c2_samples = adbxd_hippo_sampanno[which(adbxd_hippo_sampanno$contract == "C2"),"sample_id"]
+
+adbxd_peptides_filtered = adbxd_peptides_raw
+peptides_filter = which(rowSums(adbxd_peptides_filtered == 0) == 0)
+adbxd_peptides_filtered = adbxd_peptides_filtered[peptides_filter,]
+adbxd_peptides_filtered$peptide = row.names(adbxd_peptides_filtered)
+```
+
+First, visualizing the degree to which signal drift over the course of a batch is a problem.
+
+```{r}
+for (i in unique(adbxd_hippo_sampanno$batch)) {
+  batch_i = adbxd_hippo_sampanno[which(adbxd_hippo_sampanno$batch == i & !is.na(adbxd_hippo_sampanno$strain)),"sample_id"]
+  cors_i = cor(as.numeric(adbxd_hippo_sampanno[batch_i,"batch_elapsed"]),
+               t(adbxd_peptides_filtered[,batch_i]),
+               method = "spearman")
+  quantile_i = quantile(cors_i, na.rm = TRUE)
+  df_i = data.frame(row.names = i,
+                    batch = i,
+                    n = length(batch_i),
+                    n_not_na_peptides = length(which(!is.na(cors_i))),
+                    total_elapsed = max(as.numeric(adbxd_hippo_sampanno[batch_i,"batch_elapsed"])),
+                    cors_0percentile = quantile_i["0%"],
+                    cors_25percentile = quantile_i["25%"],
+                    cors_50percentile = quantile_i["50%"],
+                    cors_75percentile = quantile_i["75%"],
+                    cors_100percentile = quantile_i["100%"])
+  if (i == "C1_01") {
+    batch_df = df_i
+  } else {
+    batch_df = rbind(batch_df, df_i)
+  }
+}
+batch_df$contract = gsub("^(C[12])_\\d{2}$","\\1",batch_df$batch)
+
+batch_degradation_plot = ggplot(data = batch_df, aes(x = batch, 
+                            color = contract)) +
+  geom_boxplot(aes(ymin = cors_0percentile,
+                   lower = cors_25percentile,
+                   middle = cors_50percentile,
+                   upper = cors_75percentile,
+                   ymax = cors_100percentile),
+               stat = "identity") +
+  theme_bw() +
+  theme(axis.text.x = element_text(hjust = 1, angle = 45))
+batch_degradation_plot
+```
+
+Visualizing raw data in hierarcical clustering
+
+```{r adbxd_hippo_hierarc}
+adbxd_hippo_log2 = log_transform_dm(as.matrix(adbxd_peptides_raw), 
+                                    log_base = 2, offset = 1)
+adbxd_hippo_quant = normalize_data_dm(adbxd_hippo_log2,
+                                      normalize_func = "quantile")
+adbxd_hippo_sampanno$batch_date = as.character(adbxd_hippo_sampanno$batch_date)
+adbxd_hippo_sampanno$tissue_type = rep("Hippocampus individual", times = nrow(adbxd_hippo_sampanno))
+pool_samples = grep("pool$", adbxd_hippo_sampanno$condition)
+adbxd_hippo_sampanno[pool_samples,"tissue_type"] = adbxd_hippo_sampanno[pool_samples,"condition"]
+adbxd_hippo_color_list = sample_annotation_to_colors(adbxd_hippo_sampanno,
+                                                     factor_columns = c("batch","contract",
+                                                                        "age","sex","genotype",
+                                                                        "strain","batch_date",
+                                                                        "tissue_type"),
+                                                     numeric_columns = c("run_order","batch_elapsed"))
+saveRDS(adbxd_hippo_color_list, "./data/adbxd_hippo_color_list.RDS")
+
+plot_hierarchical_clustering(adbxd_hippo_quant,
+                             sample_annotation = adbxd_hippo_sampanno,
+                             color_list = adbxd_hippo_color_list,
+                             factors_to_plot = c("contract","batch_date","batch",
+                                                 "tissue_type","age","genotype",
+                                                 "sex","strain"),
+                             distance = "euclidean", agglomeration = "complete",
+                             label_samples = FALSE)
+```
+
+Doing the same for the protein data
+
+```{r visualize_protein_level}
+adbxd_proteins_raw_NA_added = adbxd_proteins_raw
+adbxd_proteins_raw_NA_added[which(adbxd_proteins_raw_NA_added == 0, arr.ind = TRUE)] = NA
+adbxd_hippo_proteins_log2 = log_transform_dm(adbxd_proteins_raw_NA_added,
+                                             log_base = 2, offset = 1)
+adbxd_hippo_proteins_quant = normalize_data_dm(adbxd_hippo_proteins_log2,
+                                               normalize_func = "quantile")
+
+plot_hierarchical_clustering(adbxd_hippo_proteins_quant,
+                             sample_annotation = adbxd_hippo_sampanno,
+                             color_list = adbxd_hippo_color_list,
+                             factors_to_plot = c("contract","batch_date","batch",
+                                                 "tissue_type","age","genotype",
+                                                 "sex","strain"),
+                             distance = "euclidean", agglomeration = "complete",
+                             label_samples = FALSE)
+```
+Plotting heatmap of the same.
+
+```{r heatmap_of_quantile, fig.height = 18, fig.width = 7}
+plot_heatmap_diagnostic(adbxd_hippo_quant, 
+                        sample_annotation = adbxd_hippo_sampanno,
+                        factors_to_plot = c("contract","batch",
+                                            "tissue_type"),
+                        cluster_cols = TRUE,
+                        color_list = adbxd_hippo_color_list,
+                        show_rownames = FALSE, show_colnames = FALSE)
+```
+
+From a discrete data perspective, the `contract` and `batch` variables are the strongest presence in the dataset.
+
+Plotting sample mean by run order. Plotting based upon a number of variables starting with `batch`.
+
+```{r adbxd_hippo_run_order_batch}
+plot_sample_mean(adbxd_hippo_log2, adbxd_hippo_sampanno, order_col = "run_order",
+                 batch_col = "batch", color_by_batch = TRUE,
+                 color_scheme = adbxd_hippo_color_list[["batch"]])
+```
+
+Visualizing the effect of `contract`.
+
+```{r adbxd_hippo_run_order_contract}
+plot_sample_mean(adbxd_hippo_log2, adbxd_hippo_sampanno, order_col = "run_order",
+                 batch_col = "contract", color_by_batch = TRUE,
+                 color_scheme = adbxd_hippo_color_list[["contract"]])
+```
+
+Visualizing the effect of `batch_date`.
+
+```{r adbxd_hippo_run_order_batch_date}
+plot_sample_mean(adbxd_hippo_log2, adbxd_hippo_sampanno, order_col = "run_order",
+                 batch_col = "batch_date", color_by_batch = TRUE,
+                 color_scheme = adbxd_hippo_color_list[["batch_date"]])
+```
+
+### Batch correcting hippocampus data
+
+The batch varibles will be dealt with next.
+
+Starting with Loess correction within batches. Exporting this so that Loess correction may be done in parallel on the cluster.
+
+```{r loess_correction_preparation}
+# Need a column in the sample annotation sheet called "sample_id_col"
+# This also needs to be a tibble
+# Finally, the order column needs to be titled "order"
+adbxd_hippo_sampanno$sample_id_col = adbxd_hippo_sampanno$sample_id
+adbxd_hippo_sampanno$order = adbxd_hippo_sampanno$run_order
+
+# Loess correction will be done on a total of 15 sets of columns
+# These sets will be 2 or 3 batches from within the same contract
+# The following grep commands create a variable to use to iterate over
+# the columns in a systematic way.
+adbxd_hippo_sampanno$loess_correction_n = ifelse(gsub("^C([12])_\\d{2}$","\\1",adbxd_hippo_sampanno$batch) == 1,
+                                           as.numeric(gsub("^C[12]_(\\d{2})$","\\1",adbxd_hippo_sampanno$batch)),
+                                           21 + as.numeric(gsub("^C[12]_(\\d{2})$","\\1",adbxd_hippo_sampanno$batch)))
+adbxd_hippo_sampanno$loess_correction_n = ifelse(adbxd_hippo_sampanno$loess_correction_n < 21, (adbxd_hippo_sampanno$loess_correction_n + 1) %/% 2,
+                                                 (adbxd_hippo_sampanno$loess_correction_n) %/% 2)
+
+
+adbxd_hippo_sampanno_tibble = as_tibble(adbxd_hippo_sampanno)
+saveRDS(adbxd_hippo_quant, "./data/adbxd_hippo_peptide_quantnorm.RDS")
+saveRDS(adbxd_hippo_sampanno, "./data/adbxd_hippo_sampanno_quantnorm.RDS")
+```
+
+Note that all steps after this are performed in the next script on [batch adjustment part 2](./102_normalization_batch_adjustment_completion.html). That script has complete documentation of the Loess correction for within batch signal drift.

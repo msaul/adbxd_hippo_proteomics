@@ -1,0 +1,421 @@
+---
+title: "AD-BXD Proteome QC/QA"
+output:
+  workflowr::wflow_html:
+    toc: true
+editor_options:
+  chunk_output_type: console
+bibliography: references.bib
+---
+
+### Loading Data
+
+pQTL analysis was done in parallel using a script written to perform a job array.
+
+Loading libraries
+
+```{r libraries}
+library("limma")
+library("ggplot2")
+library("tidyverse")
+library("MASS")
+library("qtl2")
+library("pcaMethods")
+```
+
+Loading proteome data.
+
+```{r load_proteome_data}
+adbxd_hippo_peptides          = readRDS("./data/adbxd_hippo_peptide_new.RDS")
+adbxd_hippo_pgroup            = readRDS("./data/adbxd_hippo_pgroup_new.RDS")
+adbxd_hippo_sampanno          = readRDS("./data/adbxd_hippo_sampanno_quantnorm.RDS")
+adbxd_hippo_pgroup_annotation = readRDS("./data/adbxd_hippo_pgroup_new_annot.RDS")
+adbxd_annot_list_coordinates  = readRDS("./data/adbxd_uniprot_coordinates.RDS")
+adbxd_annot_list_uniprot      = readRDS("./data/adbxd_uniprot_alldata.RDS")
+adbxd_coord_df                = readRDS("./data/adbxd_uniprot_coord_df.RDS")
+adbxd_genotypes               = readRDS("./data/bxd_geno_data.RDS")
+adbxd_geno_meta               = readRDS("./data/bxd_geno_meta.RDS")
+```
+
+### Sex QC
+
+```{r get_individual_hippo}
+# Getting individual hippocampus samples
+adbxd_hippo_samps = adbxd_hippo_sampanno[which(adbxd_hippo_sampanno$sample_type == "Hippocampus individual"),c("sample_id","strain","sex","age","genotype")]
+
+# Getting X and Y chromosome proteins
+X_chr_proteins = adbxd_coord_df[which(adbxd_coord_df$chromosome == "X"),]
+Y_chr_proteins = adbxd_coord_df[which(adbxd_coord_df$chromosome == "Y"),]
+
+# Getting DDX3X and DDX3Y
+DDX3X = "Q62167"
+DDX3Y = "Q62095"
+
+adbxd_hippo_samps_xy = adbxd_hippo_samps
+adbxd_hippo_samps_xy$DDX3X = adbxd_hippo_pgroup[DDX3X,row.names(adbxd_hippo_samps_xy)]
+adbxd_hippo_samps_xy$DDX3Y = adbxd_hippo_pgroup[DDX3Y,row.names(adbxd_hippo_samps_xy)]
+# adbxd_hippo_samps_xy[which(is.na(adbxd_hippo_samps_xy$DDX3Y)),"DDX3Y"] = 0
+# adbxd_hippo_samps_xy[which(is.na(adbxd_hippo_samps_xy$DDX3X)),"DDX3X"] = 0
+
+ggplot(data = adbxd_hippo_samps_xy, 
+       aes(x = DDX3X, 
+           y = DDX3Y, 
+           color = sex)) + 
+  geom_point() +
+  scale_color_manual(values = c("#3399CC","#33CC33")) +
+  theme_bw() +
+  theme(panel.grid = element_line(color = "#FFFFFF"))
+```
+
+These two proteins should not be correlated or overlapping. DDX3Y should not be expressed in female mice.
+
+It appears that at the protein group level, *Ddx3x* and *DDX3Y* display overlap. The likeliest culprit is that these two similar proteins share many peptides and that the protein group summarization consequently acts inappropriately in pooling peptides that are indistinguishable between these two. A better approach might be to find the peptides that aren't shared between these two proteins.
+
+Identifying proteins most affected by sex using Wilcoxon tests.
+
+```{r wilcox}
+wilcox_tests_sex = data.frame(protein = character(),
+                              pvalue = numeric(),
+                              pvalue_zero_imputed = numeric(),
+                              mean_female = numeric(),
+                              mean_male = numeric(),
+                              median_female = numeric(),
+                              median_male = numeric(),
+                              n_na = numeric())
+for (i in seq_len(nrow(adbxd_hippo_pgroup))) {
+  row_i = row.names(adbxd_hippo_pgroup)[i]
+  vector_i = adbxd_hippo_pgroup[row_i,adbxd_hippo_samps$sample_id]
+  wilcox_i = wilcox.test(vector_i ~  adbxd_hippo_samps$sex, na.action = "na.omit")
+  wilcox_nona_i = wilcox.test(ifelse(is.na(vector_i),0,vector_i) ~  adbxd_hippo_samps$sex)
+  n_na_i = length(which(is.na(adbxd_hippo_pgroup[row_i,adbxd_hippo_samps$sample_id])))
+  wilcox_tests_sex[i,"protein"] = row_i
+  wilcox_tests_sex[i,"pvalue"] = wilcox_i$p.value
+  wilcox_tests_sex[i,"pvalue_zero_imputed"] = wilcox_nona_i$p.value
+  wilcox_tests_sex[i,"mean_female"] = mean(vector_i[which(adbxd_hippo_samps$sex == "Female")], na.rm = TRUE)
+  wilcox_tests_sex[i,"mean_male"] = mean(vector_i[which(adbxd_hippo_samps$sex == "Male")], na.rm = TRUE)
+  wilcox_tests_sex[i,"median_female"] = median(vector_i[which(adbxd_hippo_samps$sex == "Female")], na.rm = TRUE)
+  wilcox_tests_sex[i,"median_male"] = median(vector_i[which(adbxd_hippo_samps$sex == "Male")], na.rm = TRUE)
+  wilcox_tests_sex[i,"n_na"] = n_na_i
+}
+
+wilcox_tests_sex = wilcox_tests_sex |>
+  arrange(pvalue) |>
+  mutate(fdr = p.adjust(pvalue, method = "fdr")) |>
+  as.data.frame()
+
+row.names(wilcox_tests_sex) = wilcox_tests_sex$protein
+saveRDS(wilcox_tests_sex, "./data/wilcox_tests_sex.RDS")
+
+best_sex_proteins = wilcox_tests_sex |>
+  filter(fdr < 0.1) |>
+  pull(protein)
+
+best_sex_proteins = adbxd_coord_df[best_sex_proteins,] |>
+  filter(!is.na(chromosome))
+best_sex_proteins = cbind(best_sex_proteins, 
+                          wilcox_tests_sex[row.names(best_sex_proteins),])
+best_sex_proteins
+```
+
+Now doing LDA of these proteins.
+
+```{r lda}
+pca_in = t(adbxd_hippo_pgroup[best_sex_proteins[which(best_sex_proteins$n_na == 0),"uniprot"],adbxd_hippo_samps$sample_id])
+ncol_pca_in = ncol(pca_in)
+lda_df = cbind(as.data.frame(pca_in), adbxd_hippo_samps$sex)
+colnames(lda_df)[ncol_pca_in + 1] = "sex"
+
+lda = lda(sex ~ ., data = lda_df)
+lda_df$ld1 = predict(lda, lda_df[,(-1 * (nrow(best_sex_proteins) + 1))])$x
+
+sex_pca = prcomp(pca_in, scale = TRUE, center = TRUE)
+sex_pca_x = as.data.frame(sex_pca$x[,1:4])
+sex_pca_x = cbind(adbxd_hippo_samps,sex_pca_x[adbxd_hippo_samps$sample_id,])
+
+library("ggbeeswarm")
+
+sex_lda = ggplot(data = lda_df, aes(x = sex, y = ld1, color = sex)) +
+  geom_violin() +
+  geom_boxplot(width = 0.1, outlier.color = NA) +
+  geom_beeswarm() +
+  scale_color_manual(name = "Sex", values = c("#3399CC","#66CC66")) +
+  theme_bw() +
+  theme(panel.grid = element_line(color = "#FFFFFF")) +
+  ylab("LD1") +
+  xlab("Sex")
+
+best_pair = ggplot(data = lda_df, aes(x = Q00623, y = P63300, color = sex)) +
+  geom_point() +
+  scale_color_manual(name = "Sex", values = c("#3399CC","#66CC66")) +
+  theme_bw() +
+  theme(panel.grid = element_line(color = "#FFFFFF"))
+
+library("cowplot")
+plot_grid(best_pair, sex_lda, ncol = 2, labels = LETTERS[1:2], label_size = 12)
+```
+
+While we can reliably differentiate between males and females at the population level by proteomics, we can't use proteomics to individually assign mice to male or female. This is possible in transcriptomics, but we note that *Xist* is not translated.
+
+This limits our ability to QC samples based upon their sex calls. 
+
+Attempting the same thing using random forest for classifictaion. Using code modified from [StatQuest's random forests R tutorial.](https://www.youtube.com/watch?v=6EXPYzbfLCE).
+
+```{r random_forest_sex_pgroup}
+library("randomForest")
+rf_data = as.data.frame(t(adbxd_hippo_pgroup[best_sex_proteins$uniprot,adbxd_hippo_samps$sample_id]))
+rf_data$sex = as.factor(adbxd_hippo_samps$sex)
+rf_data_imputed = rfImpute(sex ~ ., data = rf_data, iter = 6)
+rf_sex = randomForest(sex ~ ., data = rf_data_imputed, proximity = TRUE)
+rf_sex
+```
+
+The out-of-bag error rate is `r paste0(round(100 * rf_sex$err.rate[nrow(rf_sex$err.rate),"OOB"], 2),"%")`.
+
+Looking at how the random forest evolves per number of trees.
+
+```{r random_forest_sex_pgroup_oob}
+oob.error.data = data.frame(
+  Trees = rep(1:nrow(rf_sex$err.rate), times = 3),
+  Type = rep(c("OOB","Female","Male"), each = nrow(rf_sex$err.rate)),
+  Error = c(rf_sex$err.rate[,"OOB"],
+            rf_sex$err.rate[,"Female"],
+            rf_sex$err.rate[,"Male"])
+)
+
+ggplot(data = oob.error.data, aes(x = Trees, y = Error)) +
+  geom_line(aes(color = Type)) +
+  theme_bw() +
+  theme(panel.grid = element_line(color = "#FFFFFF")) +
+  scale_color_manual(values = c("#3399CC","#66CC66","#999999"))
+```
+
+The random forest wouldn't be improved with more trees.
+
+Attempting similar analyses at the peptide level.
+
+```{r sex_peptide}
+adbxd_hippo_loess = readRDS("./data/adbxd_hippo_loess_peptides.RDS")
+adbxd_hippo_loess_isna = ifelse(is.na(adbxd_hippo_loess),0,1)[,adbxd_hippo_samps$sample_id]
+
+adbxd_hippo_loess_isna_male = adbxd_hippo_loess_isna[,which(adbxd_hippo_samps$sex == "Male")]
+n_males = ncol(adbxd_hippo_loess_isna_male)
+adbxd_hippo_loess_n_na_male = rowSums(adbxd_hippo_loess_isna_male)
+
+adbxd_hippo_loess_isna_female = adbxd_hippo_loess_isna[,which(adbxd_hippo_samps$sex == "Female")]
+n_females = ncol(adbxd_hippo_loess_isna_female)
+adbxd_hippo_loess_n_na_female = rowSums(adbxd_hippo_loess_isna_female)
+
+adbxd_hippo_loess_n_na_sex = data.frame(row.names = names(adbxd_hippo_loess_n_na_male),
+                                        peptide = names(adbxd_hippo_loess_n_na_male),
+                                        male_n_na = adbxd_hippo_loess_n_na_male,
+                                        female_n_na = adbxd_hippo_loess_n_na_female[names(adbxd_hippo_loess_n_na_male)])
+adbxd_hippo_loess_n_na_sex$p_na_male = adbxd_hippo_loess_n_na_sex$male_n_na / n_males
+adbxd_hippo_loess_n_na_sex$p_na_female = adbxd_hippo_loess_n_na_sex$female_n_na / n_females
+adbxd_hippo_loess_n_na_sex$difference_p = abs(adbxd_hippo_loess_n_na_sex$p_na_female - adbxd_hippo_loess_n_na_sex$p_na_male)
+adbxd_hippo_loess_n_na_sex = adbxd_hippo_loess_n_na_sex[order(adbxd_hippo_loess_n_na_sex$difference_p, decreasing = TRUE),]
+```
+
+Running Wilcoxon test on peptides
+
+```{r wilcox_sex_peptide}
+adbxd_hippo_peptides_filter = (rowSums(is.na(adbxd_hippo_peptides)) / ncol(adbxd_hippo_peptides)) < 0.8
+adbxd_hippo_peptides_df = as.data.frame(t(adbxd_hippo_peptides[which(adbxd_hippo_peptides_filter),]))
+adbxd_hippo_peptides_df$sex = adbxd_hippo_samps[row.names(adbxd_hippo_peptides_df),"sex"]
+
+adbxd_hippo_peptides_sex_wilcox = adbxd_hippo_peptides_df |>
+  filter(!is.na(sex)) |>
+  pivot_longer(!sex,
+               names_to = "peptide") |>
+  group_by(peptide) |>
+  summarize(n_na = length(which(is.na(value))),
+            wilcox_pvalue = wilcox.test(value ~ sex, na.action = "na.omit")$p.value) |>
+  mutate(wilcox_fdr = p.adjust(wilcox_pvalue, method = "BH"))
+
+wilcox_tests_sex_peptides = data.frame(peptide = character(),
+                                       pvalue = numeric(),
+                                       pvalue_zero_imputed = numeric(),
+                                       mean_female = numeric(),
+                                       mean_male = numeric(),
+                                       median_female = numeric(),
+                                       median_male = numeric(),
+                                       n_na = numeric())
+for (i in seq_len(nrow(adbxd_hippo_peptides))) {
+  row_i = row.names(adbxd_hippo_peptides)[i]
+  vector_i = adbxd_hippo_peptides[row_i,adbxd_hippo_samps$sample_id]
+  wilcox_i = wilcox.test(vector_i ~  adbxd_hippo_samps$sex, na.action = "na.omit")
+  wilcox_nona_i = wilcox.test(ifelse(is.na(vector_i),0,vector_i) ~  adbxd_hippo_samps$sex)
+  n_na_i = length(which(is.na(adbxd_hippo_peptides[row_i,adbxd_hippo_samps$sample_id])))
+  wilcox_tests_sex_peptides[i,"peptide"] = row_i
+  wilcox_tests_sex_peptides[i,"pvalue"] = wilcox_i$p.value
+  wilcox_tests_sex_peptides[i,"pvalue_zero_imputed"] = wilcox_nona_i$p.value
+  wilcox_tests_sex_peptides[i,"mean_female"] = mean(vector_i[which(adbxd_hippo_samps$sex == "Female")], na.rm = TRUE)
+ wilcox_tests_sex_peptides[i,"mean_male"] = mean(vector_i[which(adbxd_hippo_samps$sex == "Male")], na.rm = TRUE)
+  wilcox_tests_sex_peptides[i,"median_female"] = median(vector_i[which(adbxd_hippo_samps$sex == "Female")], na.rm = TRUE)
+  wilcox_tests_sex_peptides[i,"median_male"] = median(vector_i[which(adbxd_hippo_samps$sex == "Male")], na.rm = TRUE)
+  wilcox_tests_sex_peptides[i,"n_na"] = n_na_i
+}
+
+wilcox_tests_sex_peptides = wilcox_tests_sex_peptides |>
+  arrange(pvalue) |>
+  mutate(fdr = p.adjust(pvalue, method = "fdr")) |>
+  as.data.frame()
+
+row.names(wilcox_tests_sex_peptides) = wilcox_tests_sex_peptides$peptide
+saveRDS(wilcox_tests_sex_peptides, "./data/wilcox_tests_sex_peptides.RDS")
+
+best_sex_peptides = adbxd_hippo_peptides_sex_wilcox |>
+  filter(fdr < 0.01) |>
+  pull(peptide)
+
+best_sex_peptides = wilcox_tests_sex_peptides[best_sex_peptides,]
+best_sex_peptides
+```
+
+Doing LDA on the peptides.
+
+```{r lda_sex_peptide}
+pca_in_peptides = t(adbxd_hippo_peptides[best_sex_peptides$peptide,adbxd_hippo_samps$sample_id])
+colnames(pca_in_peptides) = gsub("^(.*)@.*$","\\1",colnames(pca_in_peptides))
+pca_in_peptides = pca_in_peptides[,which(!(duplicated(colnames(pca_in_peptides))))]
+lda_peptides_df = cbind(as.data.frame(pca_in_peptides), adbxd_hippo_samps$sex)
+colnames(lda_peptides_df)[ncol(pca_in_peptides) + 1] = "sex"
+lda_peptides_df$sex = as.factor(lda_peptides_df$sex)
+lda_peptides_df_imputed = rfImpute(sex ~ ., data = lda_peptides_df, iter = 6)
+
+lda_peptides = lda(sex ~ ., data = lda_peptides_df_imputed)
+lda_peptides_df$ld1 = predict(lda, lda_df[,(-1 * (nrow(best_sex_proteins) + 1))])$x
+lda_peptides_df = lda_peptides_df |>
+  group_by(sex) |>
+  mutate(mean_ld1 = mean(ld1),
+         sd_ld1 = sd(ld1),
+         z_ld1 = (ld1 - mean_ld1) / sd_ld1,
+         is_outlier = ifelse(as.character(sex) == "Female",
+         z_ld1 >= 3, z_ld1 <= -3)) |>
+  as.data.frame()
+
+sex_pca = prcomp(pca_in, scale = TRUE, center = TRUE)
+sex_pca_x = as.data.frame(sex_pca$x[,1:4])
+sex_pca_x = cbind(adbxd_hippo_samps,sex_pca_x[adbxd_hippo_samps$sample_id,])
+
+library("ggbeeswarm")
+
+sex_peptides_lda = ggplot(data = lda_peptides_df, 
+                          aes(x = sex, 
+                              y = ld1, 
+                              color = sex, 
+                              shape = is_outlier)) +
+  geom_boxplot(width = 0.1, outlier.color = NA) +
+  geom_beeswarm() +
+  scale_color_manual(name = "Sex", values = c("#3399CC","#66CC66")) +
+  theme_bw() +
+  theme(panel.grid = element_line(color = "#FFFFFF")) +
+  ylab("LD1") +
+  xlab("Sex")
+
+
+Serpina1e_plot = ggplot(data = lda_peptides_df, 
+                          aes(x = sex, 
+                              y = IFNSGADLSGITEENAPLK, 
+                              color = sex)) +
+  geom_boxplot(width = 0.1, outlier.color = NA) +
+  geom_beeswarm() +
+  scale_color_manual(name = "Sex", values = c("#3399CC","#66CC66")) +
+  theme_bw() +
+  theme(panel.grid = element_line(color = "#FFFFFF")) +
+  ylab("Q00898 Peptide") +
+  xlab("Sex")
+
+plot_grid(Serpina1e_plot, sex_peptides_lda, ncol = 2, label_size = 12, labels = c("A","B"))
+```
+
+Doing random forest on the peptides.
+
+```{r peptide_random_forest}
+rf_peptide_data = as.data.frame(t(adbxd_hippo_peptides[best_sex_peptides$peptide,adbxd_hippo_samps$sample_id]))
+
+# Changing column names so they play nicely with the randomForest package
+colnames(rf_peptide_data) = gsub("^(.*)@.*$","\\1",colnames(rf_peptide_data))
+colnames(rf_peptide_data) = gsub("\\[\\+57\\]","c57c",colnames(rf_peptide_data))
+
+rf_peptide_data = rf_peptide_data[,which(!(duplicated(colnames(rf_peptide_data))))]
+rf_peptide_data$sex = as.factor(adbxd_hippo_samps$sex)
+rf_peptide_data_imputed = rfImpute(sex ~ ., data = rf_peptide_data, iter = 6)
+rf_peptide_sex = randomForest(sex ~ ., data = rf_peptide_data_imputed, proximity = TRUE)
+rf_peptide_sex                     
+```
+
+The out-of-bag error rate for the peptide-based sex classification is `r paste0(round(100 * rf_peptide_sex$err.rate[nrow(rf_peptide_sex$err.rate),"OOB"], 2),"%")`.
+
+### BXD Strain QC
+
+```{r trypsin_digest}
+trypsin_digestion_d2_different = readRDS("./data/trypsin_digestions_D2.RDS")
+
+trypsin_digestion_d2_different$B6 = gsub("\\*","",trypsin_digestion_d2_different$B6)
+trypsin_digestion_d2_different$B6 = gsub("-","",trypsin_digestion_d2_different$B6)
+trypsin_digestion_d2_different$D2 = gsub("\\*","",trypsin_digestion_d2_different$D2)
+trypsin_digestion_d2_different$D2 = gsub("-","",trypsin_digestion_d2_different$D2)
+
+adbxd_peptides = gsub("^(.*);.*@.*$","\\1",row.names(adbxd_hippo_peptides))
+adbxd_uniprot = gsub("^.*;.*@.*\\|(.*)\\|.*$","\\1",row.names(adbxd_hippo_peptides))
+
+D2_peptides_in_dataset = trypsin_digestion_d2_different[which(trypsin_digestion_d2_different$B6 %in% adbxd_peptides & trypsin_digestion_d2_different$not_equal),]
+D2_peptides_in_dataset = D2_peptides_in_dataset[which(!(duplicated(paste0(D2_peptides_in_dataset$B6,"_",D2_peptides_in_dataset)))),]
+D2_peptides_in_dataset = D2_peptides_in_dataset[which(!(D2_peptides_in_dataset$D2 %in% adbxd_peptides)),]
+
+adbxd_hippo_peptides_D2_different = adbxd_hippo_peptides[which(adbxd_peptides %in% D2_peptides_in_dataset$B6),]
+adbxd_D2_different_proteins = gsub("^.*;.*@.*\\|(.*)\\|.*$","\\1",row.names(adbxd_hippo_peptides_D2_different))
+adbxd_D2_all_there = row.names(adbxd_hippo_peptides_D2_different)[which(rowSums(is.na(adbxd_hippo_peptides_D2_different)) == 0)]
+```
+
+Looking at a specific example in RGS14.
+
+```{r rgs14}
+RGS14 = "P97492"
+RGS14_genotype = read.table(file = "./data/ENSMUSG00000052087.txt",
+                            header = FALSE)
+RGS14_genotype[1,] = gsub("^BBXD","BXD",RGS14_genotype[1,])
+RGS14_genotype[1,] = gsub("^(BXD\\d+[ab]*)_.*$","\\1",RGS14_genotype[1,])
+RGS14_genotype[1,] = gsub("^B6_0333_no_gap$","C57BL/6J",RGS14_genotype[1,])
+RGS14_genotype[1,] = gsub("^DBA_2J_0334$","DBA/2J",RGS14_genotype[1,])
+RGS14_genotype_names = RGS14_genotype[1,]
+RGS14_genotype = as.character(RGS14_genotype[2,])
+names(RGS14_genotype) = RGS14_genotype_names
+
+adbxd_hippo_RGS14_peptides = adbxd_hippo_sampanno[which(adbxd_hippo_sampanno$sample_type == "Hippocampus individual"),]
+adbxd_hippo_RGS14_peptides$Rgs14_genotype = RGS14_genotype[adbxd_hippo_RGS14_peptides$strain]
+
+adbxd_hippo_RGS14_peptides$QPMDLENPVSSVASQTLVLDTPPDAK = adbxd_hippo_peptides[grep("^QPMDLENPVSSVASQTLVLDTPPDAK", row.names(adbxd_hippo_peptides)),adbxd_hippo_RGS14_peptides$sample_id]
+adbxd_hippo_RGS14_peptides$EMTGGAMNSALR = adbxd_hippo_peptides[grep("^EMTGGAMNSALR", row.names(adbxd_hippo_peptides)),adbxd_hippo_RGS14_peptides$sample_id]
+
+QPMDLENPVSSVASQTLVLDTPPDAK = adbxd_hippo_RGS14_peptides |>
+  filter(!is.na(Rgs14_genotype)) |>
+  ggplot(aes(x = Rgs14_genotype, 
+             y = QPMDLENPVSSVASQTLVLDTPPDAK,
+             color = Rgs14_genotype)) +
+  geom_boxplot(outlier.color = NA) +
+  geom_beeswarm(size = 0.5) +
+  theme_bw() +
+  theme(panel.grid = element_line(color = "#FFFFFF"),
+        legend.position = "none") +
+  scale_color_manual(values = c("#000000","#999999")) +
+  xlab("Rgs14 Genotype")+
+  ggtitle("QPMDLENPVSSVASQTLVLDTPPDAK\n(DIFFERENT between B6 and D2)")
+
+EMTGGAMNSALR = adbxd_hippo_RGS14_peptides |>
+  filter(!is.na(Rgs14_genotype)) |>
+  ggplot(aes(x = Rgs14_genotype, 
+             y = EMTGGAMNSALR,
+             color = Rgs14_genotype)) +
+  geom_boxplot(outlier.color = NA) +
+  geom_beeswarm(size = 0.5) +
+  theme_bw() +
+  theme(panel.grid = element_line(color = "#FFFFFF"),
+        legend.position = "none") +
+  scale_color_manual(values = c("#000000","#999999")) +
+  xlab("Rgs14 Genotype") +
+  ggtitle("EMTGGAMNSALR\n(SAME between B6 and D2)")
+
+plot_grid(EMTGGAMNSALR,QPMDLENPVSSVASQTLVLDTPPDAK,
+          ncol = 2, labels = LETTERS[1:2], label_size = 12)
+```

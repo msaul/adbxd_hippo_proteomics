@@ -1,0 +1,402 @@
+---
+title: "AD-BXD Proteome Heritability Analysis"
+output:
+  workflowr::wflow_html:
+    toc: true
+editor_options:
+  chunk_output_type: console
+bibliography: references.bib
+---
+
+The previous step is [batch adjustment part 2](./102_normalization_batch_adjustment_completion.html)
+
+### Loading Clean Data
+
+Loading in clean data.
+
+```{r load_hippo_proteome}
+library("limma")
+library("ggplot2")
+library("tidyverse")
+library("MASS")
+
+adbxd_hippo_pgroup = readRDS("./data/adbxd_hippo_pgroup_new.RDS")
+adbxd_hippo_pgroup = adbxd_hippo_pgroup[grep("^Library_Peptides$", row.names(adbxd_hippo_pgroup), invert = TRUE),]
+adbxd_hippo_loess_pgroup = readRDS("./data/adbxd_hippo_pgroup_uncorrected.RDS")
+adbxd_hippo_sampanno = readRDS("./data/adbxd_hippo_sampanno_quantnorm.RDS")
+adbxd_hippo_sampanno_tibble = as_tibble(adbxd_hippo_sampanno)
+adbxd_hippo_color_list = readRDS( "./data/adbxd_hippo_color_list.RDS")
+
+adbxd_proteins = readRDS("./data/adbxd_hippo_pgroup_new.RDS")
+adbxd_proteins_annot = readRDS("./data/adbxd_hippo_pgroup_new_annot.RDS")
+adbxd_proteins_annot = adbxd_proteins_annot[grep("Library Peptides", adbxd_proteins_annot$id, invert = TRUE),]
+
+adbxd_hippo_pgroup = adbxd_proteins[,row.names(adbxd_hippo_sampanno)]
+```
+
+### Visualizing Hippocampus Proteome
+
+Running `isoMDS()` to visualize how well the batch effect has been eliminated.
+
+```{r make_mds}
+adbxd_hippo_dist = dist(t(adbxd_hippo_pgroup))
+adbxd_hippo_loess_dist = dist(t(adbxd_hippo_loess_pgroup))
+adbxd_hippo_loess_isomds = isoMDS(adbxd_hippo_loess_dist)
+adbxd_hippo_loess_isomds = as.data.frame(adbxd_hippo_loess_isomds)
+colnames(adbxd_hippo_loess_isomds) = paste0("loess_", colnames(adbxd_hippo_loess_isomds))
+adbxd_hippo_isomds = isoMDS(adbxd_hippo_dist)
+adbxd_hippo_dimreduct = cbind(adbxd_hippo_sampanno,
+                              as.data.frame(adbxd_hippo_isomds),
+                              adbxd_hippo_loess_isomds)
+```
+
+Plotting original batch effect.
+
+```{r plot_batch_effect_original}
+batch_original_plot = ggplot(data = adbxd_hippo_dimreduct, aes(x = loess_points.1, 
+                                         y = loess_points.2, 
+                                         color = batch)) + 
+  geom_point() + 
+  scale_color_manual(name = "Batch", values = adbxd_hippo_color_list$batch) +
+  xlab("Dim 1") + ylab("Dim 2") +
+  theme_bw() + 
+  theme(panel.grid = element_line(color = "#FFFFFF"))
+batch_original_plot
+```
+
+Plotting corrected batch effect.
+
+```{r plot_batch_effect}
+batch_plot = ggplot(data = adbxd_hippo_dimreduct, aes(x = points.1, 
+                                         y = points.2, 
+                                         color = batch)) + 
+  geom_point() + 
+  scale_color_manual(name = "Batch", values = adbxd_hippo_color_list$batch) +
+  xlab("Dim 1") + ylab("Dim 2") +
+  theme_bw() + 
+  theme(panel.grid = element_line(color = "#FFFFFF"))
+batch_plot
+```
+
+Plotting original contract effect.
+
+```{r plot_contract_effect_original}
+contract_original_plot = ggplot(data = adbxd_hippo_dimreduct, aes(x = loess_points.1, 
+                                         y = loess_points.2, 
+                                         color = contract)) + 
+  geom_point() + 
+  scale_color_manual(name = "contract", values = adbxd_hippo_color_list$contract) +
+  xlab("Dim 1") + ylab("Dim 2") +
+  theme_bw() + 
+  theme(panel.grid = element_line(color = "#FFFFFF"))
+contract_original_plot
+```
+
+Plotting corrected contract effect.
+
+```{r plot_contract_effect}
+contract_plot = ggplot(data = adbxd_hippo_dimreduct, aes(x = points.1, 
+                                         y = points.2, 
+                                         color = contract)) + 
+  geom_point() + 
+  scale_color_manual(name = "Contract", values = adbxd_hippo_color_list$contract) +
+  xlab("Dim 1") + ylab("Dim 2") +
+  theme_bw() + 
+  theme(panel.grid = element_line(color = "#FFFFFF"))
+contract_plot
+```
+
+Plotting original tissue type effect.
+
+```{r plot_tissue_type_effect_original}
+tissue_type_original_plot = ggplot(data = adbxd_hippo_dimreduct, aes(x = loess_points.1, 
+                                         y = loess_points.2, 
+                                         color = sample_type)) + 
+  geom_point() + 
+  scale_color_manual(name = "Tissue Type", values = adbxd_hippo_color_list$tissue_type) +
+  xlab("Dim 1") + ylab("Dim 2") +
+  theme_bw() + 
+  theme(panel.grid = element_line(color = "#FFFFFF"))
+tissue_type_original_plot
+```
+
+Plotting corrected tissue type effect.
+
+```{r plot_tissue_type_effect}
+tissue_type_plot = ggplot(data = adbxd_hippo_dimreduct, aes(x = points.1, 
+                                         y = points.2, 
+                                         color = sample_type)) + 
+  geom_point() + 
+  scale_color_manual(name = "Tissue Type", values = adbxd_hippo_color_list$tissue_type) +
+  xlab("Dim 1") + ylab("Dim 2") +
+  theme_bw() + 
+  theme(panel.grid = element_line(color = "#FFFFFF"))
+tissue_type_plot
+```
+
+### Fixing sample mixups
+
+**NOTE: The next two code blocks fix an apparent sample mixup that doesn't appear to be present in the most recent version of the data. It appears that the MacCoss Lab has fixed the mixup in the most recent signal processing pipeline. These code blocks are preserved here, but changed to `eval=FALSE` to ensure that they don't run.**
+
+With a couple of notable exceptions, it appears that the batch effect has been successfully adjusted out of the protein dataset and that samples have been mostly stratified into their proper tissue type (mouse brain reference pool stands out as a distinct cluster).
+
+For a couple of batches (`C1_03` and `C1_19`), it would appear that the hippocampus reference pool and mouse brain reference pool samples were mixed up.
+
+```{r examine_c103_c119, eval=FALSE}
+library("proBatch")
+plot_hierarchical_clustering(adbxd_hippo_pgroup[,which(adbxd_hippo_sampanno$tissue_type != "Hippocampus individual")],
+                             sample_annotation = adbxd_hippo_sampanno[which(adbxd_hippo_sampanno$tissue_type != "Hippocampus individual"),],
+                             color_list = adbxd_hippo_color_list,
+                             factors_to_plot = c("contract","batch_date","batch",
+                                                 "tissue_type","age","genotype",
+                                                 "sex","strain"),
+                             distance = "euclidean", agglomeration = "complete",
+                             label_samples = FALSE, fill_the_missing = NULL)
+
+```
+
+Trying with these samples flipped.
+
+```{r flip_c103_c119, eval=FALSE}
+adbxd_hippo_sampanno_flip = adbxd_hippo_sampanno
+adbxd_hippo_sampanno_flip[which(adbxd_hippo_sampanno_flip$tissue_type != "Hippocampus individual" & adbxd_hippo_sampanno_flip$batch == "C1_03"),"tissue_type"] = rev(adbxd_hippo_sampanno_flip[which(adbxd_hippo_sampanno_flip$tissue_type != "Hippocampus individual" & adbxd_hippo_sampanno_flip$batch == "C1_03"),"tissue_type"])
+adbxd_hippo_sampanno_flip[which(adbxd_hippo_sampanno_flip$tissue_type != "Hippocampus individual" & adbxd_hippo_sampanno_flip$batch == "C1_19"),"tissue_type"] = rev(adbxd_hippo_sampanno_flip[which(adbxd_hippo_sampanno_flip$tissue_type != "Hippocampus individual" & adbxd_hippo_sampanno_flip$batch == "C1_19"),"tissue_type"])
+plot_hierarchical_clustering(adbxd_hippo_pgroup[,which(adbxd_hippo_sampanno_flip$tissue_type != "Hippocampus individual")],
+                             sample_annotation = adbxd_hippo_sampanno_flip[which(adbxd_hippo_sampanno_flip$tissue_type != "Hippocampus individual"),],
+                             color_list = adbxd_hippo_color_list,
+                             factors_to_plot = c("contract","batch_date","batch",
+                                                 "tissue_type","age","genotype",
+                                                 "sex","strain"),
+                             distance = "euclidean", agglomeration = "complete",
+                             label_samples = FALSE, fill_the_missing = NULL)
+
+```
+
+This appears to fix the problem.
+
+With that, we are ready for further analysis.
+
+### Annotating Hippocampus Proteome
+
+Getting UniProt IDs for annotation.
+
+```{r get_uniprot_ids}
+# First, making a UniProt ID annotation data frame
+adbxd_hippo_pgroup_annotation = data.frame(row.names = row.names(adbxd_hippo_pgroup),
+                                           peptides_raw = gsub("^(.*) @ (.*)$", "\\1", row.names(adbxd_hippo_pgroup)),
+                                           proteins_raw = gsub("^(.*) @ (.*)$", "\\2", row.names(adbxd_hippo_pgroup)))
+adbxd_hippo_pgroup_annotation$peptides = lapply(adbxd_hippo_pgroup_annotation$peptides_raw, 
+                                                FUN = function(x) {paste(unique(unlist(strsplit(unlist(strsplit(x,";")), ", "))), collapse = ";", sep = "")})
+adbxd_hippo_pgroup_annotation$n_peptides = lapply(adbxd_hippo_pgroup_annotation$peptides, 
+                                                  FUN = function(x) {length(unlist(strsplit(x,";")))})
+adbxd_hippo_pgroup_annotation$n_proteins = lengths(strsplit(adbxd_hippo_pgroup_annotation$proteins_raw, split = ", "))
+adbxd_hippo_pgroup_annotation$sources = rep("", times = nrow(adbxd_hippo_pgroup_annotation))
+adbxd_hippo_pgroup_annotation$uniprot = rep("", times = nrow(adbxd_hippo_pgroup_annotation))
+adbxd_hippo_pgroup_annotation$id = rep("", times = nrow(adbxd_hippo_pgroup_annotation))
+
+for (i in 1:nrow(adbxd_hippo_pgroup_annotation)) {
+  proteins_i = unlist(strsplit(adbxd_hippo_pgroup_annotation[i,"proteins_raw"], ", "))
+  adbxd_hippo_pgroup_annotation[i,"sources"]  = paste(unique(gsub("^(\\w{2})\\|(.*)\\|(.*)$", "\\1", proteins_i)), collapse = ";", sep = "")
+  adbxd_hippo_pgroup_annotation[i,"uniprot"]  = paste(unique(gsub("^(\\w{2})\\|(.*)\\|(.*)$", "\\2", proteins_i)), collapse = ";", sep = "")
+  adbxd_hippo_pgroup_annotation[i,"id"]       = paste(unique(gsub("^(\\w{2})\\|(.*)\\|(.*)$", "\\3", proteins_i)), collapse = ";", sep = "")
+}
+
+# Making a raw annotation data frame
+adbxd_hippo_pgroup_annotation_raw = adbxd_hippo_pgroup_annotation[,grep("raw$", colnames(adbxd_hippo_pgroup_annotation))]
+adbxd_hippo_pgroup_annotation = adbxd_hippo_pgroup_annotation[,grep("raw$", colnames(adbxd_hippo_pgroup_annotation), invert = TRUE)]
+row.names(adbxd_hippo_pgroup_annotation_raw) = adbxd_hippo_pgroup_annotation$uniprot
+
+# Next, converting row names to UniProt IDs.
+row.names(adbxd_hippo_pgroup) = adbxd_hippo_pgroup_annotation[row.names(adbxd_hippo_pgroup),"uniprot"]
+row.names(adbxd_hippo_pgroup_annotation) = adbxd_hippo_pgroup_annotation$uniprot
+adbxd_hippo_pgroup_annotation = adbxd_hippo_pgroup_annotation[,c("id","uniprot","sources","n_peptides","n_proteins","peptides")]
+```
+
+Querying UniProt IDs using the REST API.
+
+```{r get_annotation_rest_api}
+library("httr")
+library("jsonlite")
+
+# Getting all Swiss-Prot annotated data.
+adbxd_uniprot = unlist(strsplit(row.names(adbxd_hippo_pgroup), split = ";"))
+adbxd_uniprot = grep("^Library_Peptides", adbxd_uniprot, invert = TRUE, value = TRUE)
+n_queries = 1 + length(adbxd_uniprot) %/% 100
+
+for (i in 1:n_queries) {
+  if (i != n_queries) {
+    indices_i = ((i - 1) * 100 + 1):(i * 100)
+  } else {
+    indices_i = ((i - 1) * 100 + 1):(length(adbxd_uniprot))
+  }
+  query_i = adbxd_uniprot[indices_i]
+  requestURL_i = paste0("https://www.ebi.ac.uk/proteins/api/coordinates?offset=0&size=100&accession=",
+                        paste(query_i, sep = "", collapse = "%2C"))
+  r_i = httr::GET(requestURL_i, httr::accept("application/json"))
+
+  httr::stop_for_status(r_i)
+
+  json_i = httr::content(r_i)
+
+  if (i == 1) {
+    annot_list_coordinates= json_i
+  } else {
+    annot_list_coordinates= c(annot_list_coordinates, json_i)
+  }
+
+  if (i %% 10 == 0) {
+    cat("Iteration ", i, "\n", sep = "")
+  }
+}
+
+for (i in 1:n_queries) {
+  if (i != n_queries) {
+    indices_i = ((i - 1) * 100 + 1):(i * 100)
+  } else {
+    indices_i = ((i - 1) * 100 + 1):(length(adbxd_uniprot))
+  }
+  query_i = adbxd_uniprot[indices_i]
+  requestURL_i = paste0("https://www.ebi.ac.uk/proteins/api/proteins?offset=0&size=100&accession=",
+                        paste(query_i, sep = "", collapse = "%2C"))
+  r_i = httr::GET(requestURL_i, httr::accept("application/json"))
+
+  httr::stop_for_status(r_i)
+
+  json_i = httr::content(r_i)
+
+  if (i == 1) {
+    annot_list_uniprot = json_i
+  } else {
+    annot_list_uniprot = c(annot_list_uniprot, json_i)
+  }
+
+  if (i %% 10 == 0) {
+    cat("Iteration ", i, "\n", sep = "")
+  }
+}
+
+names(annot_list_coordinates) = unlist(lapply(annot_list_coordinates, function(X) {return(X[["accession"]])}))
+names(annot_list_uniprot) = unlist(lapply(annot_list_uniprot, function(X) {return(X[["accession"]])}))
+```
+
+Making some useful data frames from these lists. Starting by making an index of genomic loci and gene IDs. These coordinates are in GRCm39 coordinate space.
+
+```{r make_df_from_lists}
+library("biomaRt")
+coord_nloci = lengths(lapply(annot_list_coordinates, function(X){return(lengths(X[["gnCoordinate"]]))}))
+coord_df = data.frame(row.names = names(coord_nloci),
+                      uniprot = names(coord_nloci),
+                      nloci = coord_nloci,
+                      chromosome = rep("", times = length(coord_nloci)),
+                      start_position_protein = rep("", times = length(coord_nloci)),
+                      end_position_protein = rep("", times = length(coord_nloci)),
+                      ensembl_gene_id = rep("", times = length(coord_nloci)))
+
+for (i in row.names(coord_df)) {
+  chromosome_i = character()
+  start_i = numeric()
+  end_i = numeric()
+  ensembl_gene_i = character()
+  for (j in 1:coord_df[i,"nloci"]) {
+    chromosome_i = c(chromosome_i, annot_list_coordinates[[i]]$gnCoordinate[[j]]$genomicLocation$chromosome)
+    start_i = c(start_i, annot_list_coordinates[[i]]$gnCoordinate[[j]]$genomicLocation$start)
+    end_i = c(end_i, annot_list_coordinates[[i]]$gnCoordinate[[j]]$genomicLocation$end)
+    ensembl_gene_i = c(ensembl_gene_i, annot_list_coordinates[[i]]$gnCoordinate[[j]]$ensemblGeneId)
+  }
+  coord_df[i,"chromosome"] = paste0(unique(chromosome_i), sep = "", collapse = ";")
+  coord_df[i,"start_position_protein"] = paste0(unique(start_i), sep = "", collapse = ";")
+  coord_df[i,"end_position_protein"] = paste0(unique(end_i), sep = "", collapse = ";")
+  coord_df[i,"ensembl_gene_id"] = paste0(unique(ensembl_gene_i), sep = "", collapse = ";")
+}
+
+# Specifying the Biomart location and organism
+# Using v107 (July 2022), which for mouse is in GRCm39/mm39 coordinate space
+maRt = useMart(biomart = "ENSEMBL_MART_ENSEMBL",
+               host = "https://jul2022.archive.ensembl.org/",
+               dataset = "mmusculus_gene_ensembl")
+
+# Getting the filter and return attributes
+maRt_filter = "ensembl_gene_id"
+maRt_attributes = c("mgi_symbol",
+                    "mgi_description",
+                    "mgi_id",
+                    "chromosome_name",
+                    "start_position",
+                    "end_position",
+                    "strand",
+                    "ensembl_gene_id")
+
+# Querying the Biomart service
+maRt_annotation_raw = getBM(maRt_attributes, maRt_filter, unique(unlist(strsplit(coord_df$ensembl_gene_id,";"))), maRt)
+maRt_annotation_raw = maRt_annotation_raw[which(!(duplicated(maRt_annotation_raw$ensembl_gene_id))),]
+row.names(maRt_annotation_raw) = maRt_annotation_raw$ensembl_gene_id
+colnames(maRt_annotation_raw) = paste(colnames(maRt_annotation_raw), "gene", sep = "_")
+
+coord_df = cbind(coord_df, maRt_annotation_raw[coord_df$ensembl_gene_id,grep("^ensembl_gene_id_gene$", colnames(maRt_annotation_raw), invert = TRUE)])
+```
+
+### Running Hippocampus Proteome Heritability Analysis
+
+Running heritability analysis stratified only by genotype (e.g., 5xFAD vs Ntg.).
+
+```{r adbxd_proteome_heritability}
+# Filtering things that have > 80% missingness
+adbxd_hippo_pgroup_filter = (rowSums(is.na(adbxd_hippo_pgroup)) / ncol(adbxd_hippo_pgroup)) < 0.8
+
+# Running heritability analysis
+adbxd_hippo_pgroup_h2 = cbind(adbxd_hippo_sampanno, t(adbxd_hippo_pgroup[which(adbxd_hippo_pgroup_filter),row.names(adbxd_hippo_sampanno)])) |>
+  filter(sample_type == "Hippocampus individual") |>
+  pivot_longer(cols = (1 + length(which(adbxd_hippo_pgroup_filter))):(ncol(adbxd_hippo_sampanno) + length(which(adbxd_hippo_pgroup_filter))),
+               names_to = "protein_group", values_to = "expression") |>
+  filter(!is.na(expression) & !(strain %in% c("C57BL/6J", "DBA/2J"))) |>
+  group_by(protein_group, genotype, strain) |>
+  mutate(strain_n = length(expression)) |> # Filtering out n = 1 per strain samples
+  filter(strain_n > 1) |>
+  ungroup() |>
+  group_by(protein_group, genotype) |>
+  summarize(h2_raw = summary(lm(expression ~ strain))$r.squared,
+            n_total = length(expression),
+            n_strains = length(unique(strain))) |>
+  mutate(n_per_strain = n_total / n_strains) |>
+  mutate(h2_ri_mean = h2_raw / (h2_raw + ((1 - h2_raw) / n_per_strain)))
+```
+
+Plotting proteome heritability
+
+```{r adbxd_proteome_heritability_plot}
+library("ggtext")
+adbxd_hippo_pgroup_h2_plot = adbxd_hippo_pgroup_h2 |> 
+  pivot_longer(cols = c("h2_raw","h2_ri_mean"), names_to = "measure", values_to = "h2") |> 
+  mutate(genotype_measure = factor(paste(genotype, measure), 
+                                   levels = c("Ntg h2_raw", "5xFAD h2_raw", "Ntg h2_ri_mean", "5xFAD h2_ri_mean"), 
+                                   ordered = TRUE)) |> 
+  ggplot(aes(x = genotype_measure, y = h2, color = genotype)) + 
+  geom_violin() +
+  geom_boxplot(width = 0.1, outlier.shape = NA) + 
+ 
+  scale_color_manual(name = "Genotype", 
+                     values = c("#CC3333","#444455")) +
+  xlab("Genotype and Heritability Measure") +
+  ylab("h<sup>2</sup>") +
+  ggtitle("h<sup>2</sup> of Proteome Features") +
+  theme_bw() + 
+  theme(panel.grid = element_line(color = "#FFFFFF"),
+        axis.title.y = element_markdown(),
+        plot.title = element_markdown())
+adbxd_hippo_pgroup_h2_plot
+```
+
+### Saving Data
+
+Saving heritability analysis data and annotation data.
+
+```{r save_heritability_analysis}
+saveRDS(adbxd_hippo_pgroup, "./data/adbxd_hippo_pgroup_annotated.RDS")
+saveRDS(adbxd_hippo_pgroup_h2, "./data/adbxd_hippo_pgroup_h2.RDS")
+saveRDS(adbxd_hippo_pgroup_annotation, "./data/adbxd_hippo_pgroup_annotation.RDS")
+saveRDS(annot_list_coordinates,"./data/adbxd_uniprot_coordinates.RDS")
+saveRDS(annot_list_uniprot,"./data/adbxd_uniprot_alldata.RDS")
+saveRDS(coord_df,"./data/adbxd_uniprot_coord_df.RDS")
+```
+
+The next step is doing [pQTL mapping](104_pqtl_mapping.html).

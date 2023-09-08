@@ -1,0 +1,221 @@
+---
+title: "AD-BXD Proteome Abundance and Mediation Analysis"
+output:
+  workflowr::wflow_html:
+    toc: true
+editor_options:
+  chunk_output_type: console
+bibliography: references.bib
+---
+
+### Loading Data
+
+Loading libraries
+
+```{r libraries}
+library("limma")
+library("qvalue")
+library("ggplot2")
+library("ggbeeswarm")
+library("ggrepel")
+library("ggtext")
+library("cowplot")
+library("cliqueR")
+library("tidyverse")
+library("MASS")
+library("qtl2")
+library("pcaMethods")
+library("topGO")
+source("./code/ggplot_pub_themes.R")
+```
+
+Loading proteome and genotype data.
+
+```{r load_proteome_data}
+adbxd_hippo_pgroup            = readRDS("./data/adbxd_hippo_pgroup_annotated.RDS")
+adbxd_hippo_sampanno          = readRDS("./data/adbxd_hippo_sampanno_quantnorm.RDS")
+adbxd_hippo_pgroup_annotation = readRDS("./data/adbxd_hippo_pgroup_annotation.RDS")
+adbxd_annot_list_coordinates  = readRDS("./data/adbxd_uniprot_coordinates.RDS")
+adbxd_annot_list_uniprot      = readRDS("./data/adbxd_uniprot_alldata.RDS")
+adbxd_coord_df                = readRDS("./data/adbxd_uniprot_coord_df.RDS")
+adbxd_genotypes               = readRDS("./data/bxd_geno_data.RDS")
+adbxd_geno_meta               = readRDS("./data/bxd_geno_meta.RDS")
+adbxd_5xfad_14mo_resilience   = readRDS("./data/adbxd_5xfad_14mo_resilience.RDS")
+row.names(adbxd_5xfad_14mo_resilience) = adbxd_5xfad_14mo_resilience$sample_id
+```
+
+Getting rs33539160 genotype in the sample annotation data and filtering for 14-month-old 5xFAD animals.
+
+```{r}
+adbxd_hippo_sampanno$rs33539160 = ifelse(!is.na(adbxd_hippo_sampanno$strain),
+                                         as.data.frame(t(adbxd_genotypes))[adbxd_hippo_sampanno$strain,"rs33539160"],
+                                         NA)
+adbxd_hippo_sampanno_5xfad_months14 = adbxd_hippo_sampanno |>
+  filter(age == "Months14" & genotype == "5xFAD") |>
+  mutate(rs33539160 = ifelse(rs33539160 == 1, "B6/D2","B6/B6")) |>
+  as.data.frame()
+
+adbxd_hippo_pgroup_5xfad_months14 = adbxd_hippo_pgroup[,row.names(adbxd_hippo_sampanno_5xfad_months14)]
+adbxd_hippo_pgroup_5xfad_months14 = adbxd_hippo_pgroup_5xfad_months14[which(rowSums(is.na(adbxd_hippo_pgroup_5xfad_months14)) < 0.2 * ncol(adbxd_hippo_pgroup_5xfad_months14)),]
+```
+
+Plotting genotype effect for resilience at rs33539160.
+
+```{r}
+library("ggbeeswarm")
+adbxd_5xfad_14mo_resilience$rs33539160 = ifelse(!is.na(adbxd_5xfad_14mo_resilience$strain),
+                                         as.data.frame(t(adbxd_genotypes))[adbxd_5xfad_14mo_resilience$strain,"rs33539160"],
+                                         NA)
+rs33539160_plot = adbxd_5xfad_14mo_resilience |>
+  filter(!is.na(rs33539160)) |>
+  mutate(strain = as.character(strain),
+         rs33539160 = ifelse(rs33539160 == 1, "B6/D2", "B6/B6")) |>
+  group_by(strain, rs33539160) |>
+  summarize(mean = mean(resilience, na.rm = TRUE)) |>
+  ggplot(aes(x = rs33539160, 
+             y = mean, 
+             color = rs33539160)) + 
+  geom_boxplot(outlier.shape = NA) + 
+  geom_beeswarm(size = 0.25) +
+  # ggtitle("") +
+  theme_bw() +
+  pubtheme_bw + 
+  theme(panel.grid = element_line(color = "#FFFFFF"),
+        legend.position = "none") +
+  scale_color_manual(values = c("#000000","#999999")) +
+  ylab("Strain Mean Resilience Score")
+rs33539160_plot
+```
+
+Running differential abundance analysis on 14-month 5xFAD animals.
+
+```{r}
+# Getting model matrix
+adbxd_modmat = model.matrix(~ sex + rs33539160,
+                            data = adbxd_hippo_sampanno_5xfad_months14)
+
+# Running model
+adbxd_month14_5xfad_rs33539160_lmFit = lmFit(adbxd_hippo_pgroup_5xfad_months14, 
+                                             design = adbxd_modmat, 
+                                             method = "robust", weights = NULL)
+adbxd_month14_5xfad_rs33539160_lmFit = eBayes(adbxd_month14_5xfad_rs33539160_lmFit, trend = TRUE, robust = TRUE)
+
+# Compiling top tables
+adbxd_rs33539160_toptable = as.data.frame(topTable(adbxd_month14_5xfad_rs33539160_lmFit,
+                                               coef = grep("^rs33539160", colnames(adbxd_modmat)), 
+                                               number = nrow(adbxd_hippo_pgroup_5xfad_months14)))
+adbxd_rs33539160_toptable$qvalue = qvalue(adbxd_rs33539160_toptable$P.Value)$qvalues
+saveRDS(adbxd_rs33539160_toptable, "./data/adbxd_rs33539160_toptable.RDS")
+```
+
+Showing top table for the proteins at q < 0.10.
+
+```{r proteins_q_0p10}
+adbxd_rs33539160_toptable |>
+  filter(qvalue < 0.10)
+```
+
+Plotting a volcano plot of the genotype data.
+
+```{r}
+y_threshold = mean(c(-1 * log10(max(adbxd_rs33539160_toptable[which(adbxd_rs33539160_toptable$qvalue < 0.01),"P.Value"])),
+                     -1 * log10(min(adbxd_rs33539160_toptable[which(adbxd_rs33539160_toptable$qvalue > 0.01),"P.Value"]))))
+
+adbxd_rs33539160_toptable$protein = row.names(adbxd_rs33539160_toptable
+                                              )
+adbxd_rs33539160_volcano_plot = adbxd_rs33539160_toptable |>
+  mutate(log10pvalue = -1 * log10(P.Value),
+         label = ifelse(protein == "P47791", "GSHR", ""),
+         label = ifelse(protein == "P46096", "SYT1", label),
+         label = ifelse(protein == "O54829", "RGS14", label),
+         color = ifelse(label == "", "not", "sig"),
+         color = ifelse(protein == "P47791", "GSHR", color)) |>
+  ggplot(aes(x = logFC, y = log10pvalue, label = label, color = color)) +
+  geom_hline(yintercept = y_threshold, linetype = "dashed", color = "#555555") +
+  # geom_vline(xintercept = -0.5, linetype = "dashed", color = "#555555") +
+  # geom_vline(xintercept = 0.5, linetype = "dashed", color = "#555555") +
+  geom_point(size = 0.25) +
+  geom_label_repel(size = 6 * pt_to_mm) +
+  scale_color_manual(values = c("#CC3333","#AAAAAA","#000000")) + 
+  xlab("log<sub>2</sub>(Fold-Change) for rs33539160<br />Higher = More Expression in B6/D2 Genotype") +
+  ylab("-log<sub>10</sub>(p-value)") +
+  # ggtitle("") +
+  theme_bw() +
+  pubtheme_bw + 
+  theme(legend.position = "none",
+        panel.grid = element_line(color = "#FFFFFF"),
+        axis.title.x = element_markdown(),
+        axis.title.y = element_markdown())
+
+adbxd_rs33539160_volcano_plot
+```
+
+Plotting GSHR
+
+```{r plot_GSHR}
+adbxd_5xfad_14mo_resilience$GSHR = adbxd_hippo_pgroup_5xfad_months14["P47791",row.names(adbxd_5xfad_14mo_resilience)]
+
+GSHR_plot = adbxd_5xfad_14mo_resilience |>
+  filter(!is.na(rs33539160)) |>
+  mutate(strain = as.character(strain),
+         rs33539160 = ifelse(rs33539160 == 1, "B6/D2", "B6/B6")) |>
+  group_by(strain, rs33539160) |>
+  summarize(mean = mean(GSHR, na.rm = TRUE)) |>
+  ggplot(aes(x = rs33539160, 
+             y = mean, 
+             color = rs33539160)) + 
+  geom_boxplot(outlier.shape = NA) + 
+  geom_beeswarm(size = 0.25) +
+  # ggtitle("") +
+  theme_bw() +
+  pubtheme_bw +
+  theme(panel.grid = element_line(color = "#FFFFFF"),
+        legend.position = "none") +
+  scale_color_manual(values = c("#000000","#999999")) +
+  ylab("Strain Mean GSHR Expression")
+GSHR_plot
+```
+
+Building the expression figure.
+
+```{r}
+figure_2 = plot_grid(rs33539160_plot, 
+                     adbxd_rs33539160_volcano_plot,
+                     GSHR_plot,
+                     labels = LETTERS[1:3],
+                     ncol = 3, 
+                     rel_widths = c(1,2,1),
+                     label_size = 12,
+                     align = "h")
+figure_2
+saveRDS(figure_2, "./data/figure_2.RDS")
+ggsave("./output/figure_2.pdf", figure_2, width = 174, height = 174 / 3, units = "mm")
+```
+
+Doing regression on resilience.
+
+```{r resilience_regression}
+adbxd_5xfad_14mo_resilience = adbxd_5xfad_14mo_resilience[colnames(adbxd_hippo_pgroup_5xfad_months14),]
+adbxd_resilience_modmat = model.matrix(~ sex + resilience,
+                                       data = adbxd_5xfad_14mo_resilience)
+
+# Running model
+adbxd_resilience_lmFit = lmFit(adbxd_hippo_pgroup_5xfad_months14, 
+                                             design = adbxd_resilience_modmat, 
+                                             method = "robust", weights = NULL)
+adbxd_resilience_lmFit = eBayes(adbxd_resilience_lmFit, trend = TRUE, robust = TRUE)
+
+# Compiling top tables
+adbxd_resilience_toptable = as.data.frame(topTable(adbxd_resilience_lmFit,
+                                               coef = grep("^resilience", colnames(adbxd_resilience_modmat)), 
+                                               number = nrow(adbxd_hippo_pgroup_5xfad_months14)))
+adbxd_resilience_toptable$qvalue = qvalue(adbxd_resilience_toptable$P.Value)$qvalues
+saveRDS(adbxd_resilience_toptable, "./data/adbxd_resilience_months14_toptable.RDS")
+```
+
+Displaying top resilience-correlated proteins.
+
+```{r resilience_proteins_q_0p10}
+adbxd_resilience_toptable |>
+  filter(qvalue < 0.10)
+```

@@ -1,0 +1,175 @@
+---
+title: "Data Visualization and Batch Correction"
+output:
+  workflowr::wflow_html:
+    toc: true
+editor_options:
+  chunk_output_type: console
+bibliography: references.bib
+---
+
+The previous step is [basic data wrangling](100_basic_data_wrangling.html).
+
+### Hippocampus Proteome Visualization
+
+Loading in clean data.
+
+```{r load_hippo_proteome}
+adbxd_hippo_annot =        readRDS("./data/adbxd_hippo_proteome_annotation.RDS")
+adbxd_hippo_proteome =     readRDS("./data/adbxd_hippo_proteome_data.RDS")
+adbxd_hippo_metadata =     readRDS("./data/adbxd_hippo_proteome_metadata.RDS")
+adbxd_hippo_metadata_jax = readRDS("./data/adbxd_hippo_proteome_jax_metadata.RDS")
+adbxd_hippo_metadata_uw =  readRDS("./data/adbxd_hippo_proteome_uw_metadata.RDS")
+```
+
+Doing some manipulation of metadata.
+
+```{r hippo_proteome_metadata}
+library("tidyverse")
+library("lubridate")
+adbxd_hippo_metadata = adbxd_hippo_metadata |>
+  mutate(Sex = gsub("^([MF])[ae].*$", "\\1", condition),
+         Age = gsub("^([MF][ae]\\w+)-([OY]).*-([WF]).*$", "\\2", condition),
+         Genotype = gsub("^([MF][ae]\\w+)-([OY]).*-([WF]).*$", "\\3", condition),
+         MassSpec_date = gsub("^(.*)-Lumos.*$","\\1",ms_filename)) |>
+  mutate(Sex = ifelse(Sex == "Hippocampus reference pool" | 
+                      Sex == "Mouse brain reference pool", 
+                      NA, Sex),
+         Age = ifelse(Age == "Hippocampus reference pool" | 
+                      Age == "Mouse brain reference pool", 
+                      NA, Age),
+         Genotype = ifelse(Genotype == "Hippocampus reference pool" | 
+                           Genotype == "Mouse brain reference pool", 
+                           NA, Genotype)) |>
+  mutate(Sex = ifelse(Sex == "M", "Male", Sex),
+         Age = ifelse(Age == "Y", "Months06", Age),
+         Genotype = ifelse(Genotype == "F", "5xFAD", Genotype)) |>
+  mutate(Sex = ifelse(Sex == "F", "Female", Sex),
+         Age = ifelse(Age == "O", "Months14", Age),
+         Genotype = ifelse(Genotype == "W", "Ntg", Genotype),
+         MassSpec_date = dmy(MassSpec_date))
+```
+
+Getting value to filter low-expressed proteins.
+
+```{r get_low_expressed_n_hippo}
+sample_size = adbxd_hippo_metadata |> 
+  filter(!is.na(Sex)) |> 
+  group_by(Sex, Age, Genotype) |> 
+  summarize(n = length(age_months))
+
+min_n = floor(sum(sample_size$n) * 0.75)
+```
+
+Visualizing low-dimensional projection of hippocampus proteome.
+
+```{r visualize_hippo_proteome}
+library("MASS")
+library("limma")
+hippocampus_cols = grep("^HC2_", colnames(adbxd_hippo_proteome))
+expression_filter = row.names(adbxd_hippo_proteome[which(rowSums(adbxd_hippo_proteome[,hippocampus_cols] > 0) >= min_n),])
+adbxd_hippo_dist = dist(t(adbxd_hippo_proteome[expression_filter,hippocampus_cols]))
+adbxd_hippo_isomds = isoMDS(adbxd_hippo_dist)
+adbxd_hippo_pca = prcomp(t(adbxd_hippo_proteome[expression_filter,hippocampus_cols]),
+                         scale = TRUE, center = TRUE)
+adbxd_hippo_mds = limma::plotMDS(adbxd_hippo_proteome[expression_filter,hippocampus_cols], plot = FALSE)
+adbxd_hippo_dimreduct = as.data.frame(adbxd_hippo_isomds)
+colnames(adbxd_hippo_dimreduct) = gsub("\\.","_",colnames(adbxd_hippo_dimreduct))
+adbxd_hippo_dimreduct$PC1 = adbxd_hippo_pca$x[row.names(adbxd_hippo_dimreduct),1]
+adbxd_hippo_dimreduct$PC2 = adbxd_hippo_pca$x[row.names(adbxd_hippo_dimreduct),2]
+adbxd_hippo_dimreduct$PC3 = adbxd_hippo_pca$x[row.names(adbxd_hippo_dimreduct),3]
+adbxd_hippo_dimreduct$PC4 = adbxd_hippo_pca$x[row.names(adbxd_hippo_dimreduct),4]
+
+adbxd_hippo_dimreduct$MD1 = adbxd_hippo_mds$x
+adbxd_hippo_dimreduct$MD2 = adbxd_hippo_mds$y
+adbxd_hippo_dimreduct$Sex = adbxd_hippo_metadata[row.names(adbxd_hippo_dimreduct),"Sex"]
+adbxd_hippo_dimreduct$Age = adbxd_hippo_metadata[row.names(adbxd_hippo_dimreduct),"Age"]
+adbxd_hippo_dimreduct$Genotype = adbxd_hippo_metadata[row.names(adbxd_hippo_dimreduct),"Genotype"]
+adbxd_hippo_dimreduct$Strain = adbxd_hippo_metadata[row.names(adbxd_hippo_dimreduct),"strain"]
+adbxd_hippo_dimreduct$MassSpec_Date = adbxd_hippo_metadata[row.names(adbxd_hippo_dimreduct),"MassSpec_date"]
+adbxd_hippo_dimreduct$Batch = factor(adbxd_hippo_metadata[row.names(adbxd_hippo_dimreduct),"batch"],
+                                     levels = as.character(1:10),
+                                     ordered = TRUE)
+adbxd_hippo_dimreduct = adbxd_hippo_dimreduct |>
+  arrange(MassSpec_Date, Batch)
+# adbxd_hippo_dimreduct$rbatch = sample(adbxd_hippo_dimreduct$Batch)
+# adbxd_hippo_dimreduct$is_pool = is.na(adbxd_hippo_dimreduct$Sex)
+
+# adbxd_hippo_dimreduct = adbxd_hippo_dimreduct[which(!is.na(adbxd_hippo_dimreduct$Sex)),]
+
+library("ggplot2")
+ggplot(data = adbxd_hippo_dimreduct, 
+       aes(x = points_1, y = points_2, col = Batch)) +
+  geom_point() +
+  ggtitle("Hippocampus Proteome: MDS Plot Shows Batch Effects") +
+  xlab("MD1") + ylab("MD2") +
+  scale_color_manual(values = scales::hue_pal()(length(levels(adbxd_hippo_dimreduct$Batch)))) +
+  theme_bw() +
+  theme(panel.grid = element_line(color = "#FFFFFF"))
+  
+```
+
+There is a batch effect.
+
+```{r visualize_hippo_proteome_date_effect}
+ggplot(data = adbxd_hippo_dimreduct, 
+       aes(x = points_1, y = points_2, col = as.character(MassSpec_Date))) +
+  geom_point() +
+  ggtitle("Hippocampus Proteome: MDS Plot Shows Batch Effects") +
+  xlab("MD1") + ylab("MD2") +
+  scale_color_manual(name = "Date", 
+                     values = scales::hue_pal()(length(unique(adbxd_hippo_dimreduct$MassSpec_Date)))) +
+  theme_bw() +
+  theme(panel.grid = element_line(color = "#FFFFFF"))
+  
+```
+
+The batch effect appears somewhat -- but not solely -- related to date. Visualizing the batch effect with boxplots.
+
+```{r full_boxplot}
+adbxd_hippo_proteome_for_boxplot = as.data.frame(adbxd_hippo_proteome[expression_filter,hippocampus_cols])
+adbxd_hippo_proteome_for_boxplot$protein = row.names(adbxd_hippo_proteome_for_boxplot)
+adbxd_hippo_proteome_for_boxplot_long = adbxd_hippo_proteome_for_boxplot |>
+  pivot_longer(cols = starts_with("HC2"),
+               names_to = "sample",
+               values_to = "expression") |>
+  mutate(sample = factor(sample, levels = row.names(adbxd_hippo_dimreduct), ordered = TRUE))
+adbxd_hippo_proteome_for_boxplot_long$Batch = adbxd_hippo_dimreduct[adbxd_hippo_proteome_for_boxplot_long$sample,"Batch"]
+adbxd_hippo_proteome_for_boxplot_long$MassSpec_Date = as.character(adbxd_hippo_dimreduct[adbxd_hippo_proteome_for_boxplot_long$sample,"MassSpec_Date"])
+
+ggplot(data = adbxd_hippo_proteome_for_boxplot_long, aes(x = sample, y = expression, color = Batch)) +
+  geom_boxplot() +
+  xlab(NULL) +
+  theme_bw() +
+  scale_color_manual(values = scales::hue_pal()(length(unique(adbxd_hippo_proteome_for_boxplot_long$Batch)))) +
+  theme(axis.text.x = element_text(hjust = 1, angle = 45),
+        legend.position = "none")
+```
+
+Visualizing the batch effect in the reference hippocampus and brain pools.
+
+```{r visualize_batch_hippo_pool}
+library("tidyverse")
+mouse_hippo_pool_samples = row.names(adbxd_hippo_metadata[which(adbxd_hippo_metadata$condition == "Hippocampus reference pool"),])
+mouse_hippo_pool = adbxd_hippo_proteome[,mouse_hippo_pool_samples]
+mouse_hippo_pool = mouse_hippo_pool[which(rowSums(mouse_hippo_pool != 0) == ncol(mouse_hippo_pool)),]
+mouse_hippo_pool = as.data.frame(mouse_hippo_pool)
+mouse_hippo_pool$protein = row.names(mouse_hippo_pool)
+mouse_hippo_pool_long = mouse_hippo_pool |>
+  pivot_longer(cols = starts_with("HC2R2"),
+               names_to = "sample",
+               values_to = "expression") |>
+  mutate(sample = factor(sample,
+                         levels = paste0("HC2R2_",
+                                         formatC(1:10,digits=1,flag="0")),
+                         ordered = TRUE))
+ggplot(data = mouse_hippo_pool_long, aes(x = sample, y = expression, color = sample)) +
+  geom_boxplot() +
+  xlab(NULL) +
+  theme_bw() +
+  scale_color_manual(values = scales::hue_pal()(length(levels(mouse_hippo_pool_long$sample)))) +
+  theme(axis.text.x = element_text(hjust = 1, angle = 45),
+        legend.position = "none")
+```
+
+### Batch correcting hippocampus data

@@ -1,0 +1,21 @@
+name: "JAX/UW AD-BXD Proteomics Analysis: Hippocampus and Related Datasets"
+output_dir: ../docs
+navbar:
+  title: "JAX/UW AD-BXD Proteomics Analysis: Hippocampus and Related Datasets"
+  left:
+  - text: Home
+    href: index.html
+  - text: About
+    href: about.html
+  - text: License
+    href: license.html
+output:
+  workflowr::wflow_html:
+    toc: yes
+    toc_float: yes
+    theme: readable
+    highlight: pygments
+    fig_retina: true
+    self_contained: true
+    code_folding: show
+    df_print: paged

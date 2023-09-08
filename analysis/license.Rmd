@@ -1,0 +1,12 @@
+---
+title: "License"
+output:
+  workflowr::wflow_html:
+    toc: false
+editor_options:
+  chunk_output_type: console
+---
+
+As of 2022-08-23, the text and code here have not been published. All text and code copyright Michael C. Saul, Catherine C. Kaczorowski, and Vivek M. Philip. As the primary investigator of the project, Catherine C. Kaczorowski makes the determination of any authorship and licensing.
+
+Upon public release of these data, an appropriate license will be selected.

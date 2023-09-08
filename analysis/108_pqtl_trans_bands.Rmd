@@ -1,0 +1,442 @@
+---
+title: "AD-BXD pQTL Trans Band"
+output:
+  workflowr::wflow_html:
+    toc: true
+editor_options:
+  chunk_output_type: console
+bibliography: references.bib
+---
+
+### Loading Data
+
+pQTL analysis was done in parallel using a script written to perform a job array.
+
+Loading libraries
+
+```{r libraries}
+library("limma")
+library("ggplot2")
+library("tidyverse")
+library("MASS")
+library("qtl2")
+library("pcaMethods")
+```
+
+Loading pQTL data. Looking for age-by-genotype interactions in both 14 months aged Ntg and 5xFAD animals.
+
+```{r pqtl_data}
+lod_score_thresh = 3.0
+lod_score_drop = 1.5
+
+adbxd_pqtl_ntg_files = list.files(path = "./data/pqtl/new_pqtl/", pattern = "ntg_months14")
+adbxd_pqtl_5xfad_files = list.files(path = "./data/pqtl/new_pqtl/", pattern = "5xfad_months14")
+
+for (i in adbxd_pqtl_ntg_files) {
+  pqtl_ntg_i = readRDS(paste0("./data/pqtl/new_pqtl/",i))
+  if (i == adbxd_pqtl_ntg_files[1]) {
+    adbxd_pqtl_ntg = pqtl_ntg_i
+  } else {
+    adbxd_pqtl_ntg = rbind(adbxd_pqtl_ntg, pqtl_ntg_i)
+  }
+}
+row.names(adbxd_pqtl_ntg) = paste(adbxd_pqtl_ntg$protein, 
+                                  adbxd_pqtl_ntg$rs, 
+                                  sep = "_")
+
+for (i in adbxd_pqtl_5xfad_files) {
+    pqtl_5xfad_i = readRDS(paste0("./data/pqtl/new_pqtl/",i))
+  if (i == adbxd_pqtl_5xfad_files[1]) {
+    adbxd_pqtl_5xfad = pqtl_5xfad_i
+  } else {
+    adbxd_pqtl_5xfad = rbind(adbxd_pqtl_5xfad, pqtl_5xfad_i)
+  }
+}
+row.names(adbxd_pqtl_5xfad) = paste(adbxd_pqtl_5xfad$protein, 
+                                    adbxd_pqtl_5xfad$rs, 
+                                    sep = "_")
+
+
+rm(list = c("i","pqtl_ntg_i","pqtl_5xfad_i",
+            "adbxd_pqtl_ntg_files","adbxd_pqtl_5xfad_files"))
+
+# Saving data
+saveRDS(adbxd_pqtl_5xfad, "./data/adbxd_pqtl_5xfad_months14_raw.RDS")
+saveRDS(adbxd_pqtl_ntg, "./data/adbxd_pqtl_ntg_months14_raw.RDS")
+```
+
+Loading proteome data.
+
+```{r load_proteome_data}
+adbxd_hippo_pgroup            = readRDS("./data/adbxd_hippo_pgroup_annotated.RDS")
+adbxd_hippo_sampanno          = readRDS("./data/adbxd_hippo_sampanno_quantnorm.RDS")
+adbxd_hippo_pgroup_annotation = readRDS("./data/adbxd_hippo_pgroup_annotation.RDS")
+adbxd_annot_list_coordinates  = readRDS("./data/adbxd_uniprot_coordinates.RDS")
+adbxd_annot_list_uniprot      = readRDS("./data/adbxd_uniprot_alldata.RDS")
+adbxd_coord_df                = readRDS("./data/adbxd_uniprot_coord_df.RDS")
+adbxd_genotypes               = readRDS("./data/bxd_geno_data.RDS")
+adbxd_geno_meta               = readRDS("./data/bxd_geno_meta.RDS")
+```
+
+### Filtering Data
+
+Filtering unambiguously mappable mapping results for chromosomes 1-19 and X.
+
+```{r filtering_mapping_results}
+adbxd_coord_df_filtered = adbxd_coord_df |>
+  filter(chromosome %in% c(1:19,"X"))
+
+adbxd_pqtl_ntg = adbxd_pqtl_ntg[which(adbxd_pqtl_ntg$protein %in% row.names(adbxd_coord_df_filtered)),]
+adbxd_pqtl_5xfad = adbxd_pqtl_5xfad[which(adbxd_pqtl_5xfad$protein %in% row.names(adbxd_coord_df_filtered)),]
+```
+
+Getting genome index to assist in drawing pQTL diagrams.
+
+```{r get_index}
+# Getting index of GRCm39
+GRCm39_index = read.table("https://ftp.ensembl.org/pub/release-108/fasta/mus_musculus/dna_index/Mus_musculus.GRCm39.dna.toplevel.fa.gz.fai",
+                          sep = "\t", header = FALSE)[,1:3]
+colnames(GRCm39_index) = c("chr","length","start_cumul")
+row.names(GRCm39_index) = GRCm39_index$chr
+GRCm39_index = GRCm39_index[c(1:19,"X"),]
+GRCm39_index$length = GRCm39_index$length / 1e6
+GRCm39_index$start_cumul = GRCm39_index$start_cumul / 1e6
+GRCm39_index$midpoint_cumul = GRCm39_index$start_cumul + (0.5 * GRCm39_index$length)
+```
+
+Finding Ntg 14 month peaks
+
+```{r find_ntg_peaks_1p5_lod_drop}
+lod_score_thresh = 3.0
+lod_score_drop = 1.5
+
+adbxd_pqtl_ntg_peaks = adbxd_pqtl_ntg |>
+  group_by(protein, chr) |> arrange(ps) |>
+  mutate(index = 1:length(lod)) |> 
+  mutate(is_peak = index %in% (1 + unlist(qtl2:::.find_peaks(lod, 
+                                                             lod_score_thresh, 
+                                                             lod_score_drop)))) |>
+  filter(is_peak) |>
+  arrange(protein, chr, ps)
+adbxd_pqtl_ntg_peaks = as.data.frame(adbxd_pqtl_ntg_peaks)
+adbxd_pqtl_ntg_peaks$n_peak = rep(0, times = nrow(adbxd_pqtl_ntg_peaks))
+peak_n = 1
+
+for (i in seq_len(nrow(adbxd_pqtl_ntg_peaks))) {
+  if (i == 1) {
+    adbxd_pqtl_ntg_peaks[i,"n_peak"] = peak_n
+    chr_i_m1 = adbxd_pqtl_ntg_peaks[i,"chr"]
+    prot_i_m1 = adbxd_pqtl_ntg_peaks[i,"protein"]
+    ind_i_m1 = adbxd_pqtl_ntg_peaks[i,"index"]
+    lod_i_m1 = adbxd_pqtl_ntg_peaks[i,"lod"]
+  } else {
+    chr_i = adbxd_pqtl_ntg_peaks[i,"chr"]
+    prot_i = adbxd_pqtl_ntg_peaks[i,"protein"]
+    ind_i = adbxd_pqtl_ntg_peaks[i,"index"]
+    lod_i = adbxd_pqtl_ntg_peaks[i,"lod"]
+    if (chr_i == chr_i_m1 &
+        prot_i == prot_i_m1 &
+        ind_i == (1 + ind_i_m1) &
+        lod_i == lod_i_m1) {
+      adbxd_pqtl_ntg_peaks[i,"n_peak"] = peak_n
+    } else {
+      peak_n = peak_n + 1
+      adbxd_pqtl_ntg_peaks[i,"n_peak"] = peak_n
+    }
+    chr_i_m1 = chr_i
+    prot_i_m1 = prot_i
+    ind_i_m1 = ind_i
+    lod_i_m1 = lod_i
+  }
+}
+
+adbxd_pqtl_ntg_peaks_avg = adbxd_pqtl_ntg_peaks |>
+  group_by(protein, chr, n_peak) |>
+  summarize(mean_ps = mean(ps) / 1e6,
+            rsids = paste(rs, sep = "", collapse = ";"),
+            lod = median(lod))
+adbxd_pqtl_ntg_peaks_avg = as.data.frame(adbxd_pqtl_ntg_peaks_avg)
+adbxd_pqtl_ntg_peaks_avg$qtl_cumu_ps = adbxd_pqtl_ntg_peaks_avg$mean_ps + GRCm39_index[adbxd_pqtl_ntg_peaks_avg$chr,"start_cumul"]
+adbxd_pqtl_ntg_peaks_avg$prot_chr = adbxd_coord_df_filtered[adbxd_pqtl_ntg_peaks_avg$protein,"chromosome_name_gene"]
+adbxd_pqtl_ntg_peaks_avg$prot_ps = ifelse(adbxd_coord_df_filtered[adbxd_pqtl_ntg_peaks_avg$protein,"strand_gene"] == 1,
+                                          adbxd_coord_df_filtered[adbxd_pqtl_ntg_peaks_avg$protein,"start_position_gene"],
+                                          adbxd_coord_df_filtered[adbxd_pqtl_ntg_peaks_avg$protein,"end_position_gene"]) / 1e6
+adbxd_pqtl_ntg_peaks_avg$prot_cum_ps = adbxd_pqtl_ntg_peaks_avg$prot_ps + GRCm39_index[adbxd_pqtl_ntg_peaks_avg$prot_chr,"start_cumul"]
+adbxd_pqtl_ntg_peaks_avg$is_cis = adbxd_pqtl_ntg_peaks_avg$chr == adbxd_pqtl_ntg_peaks_avg$prot_chr &
+  abs(adbxd_pqtl_ntg_peaks_avg$mean_ps - adbxd_pqtl_ntg_peaks_avg$prot_ps) <= 25
+
+saveRDS(adbxd_pqtl_ntg_peaks_avg, "./data/adbxd_pqtl_ntg_months14_peaks.RDS")
+```
+
+Plotting Ntg peaks.
+
+```{r plot_ntg_peaks}
+pqtl_plot_ntg = ggplot(data = adbxd_pqtl_ntg_peaks_avg[which(adbxd_pqtl_ntg_peaks_avg$lod > 4 & !is.na(adbxd_pqtl_ntg_peaks_avg$is_cis)),], 
+       aes(x = qtl_cumu_ps, 
+           y = prot_cum_ps, 
+           size = lod,
+           color = is_cis)) +
+  geom_abline(slope = 1, 
+              intercept = 0, 
+              linetype = "dashed",
+              color = "#AAAAAA") +
+  geom_point(alpha = 0.5) +
+  scale_color_manual(name = "cis-pQTL",
+                     values = c("#999999","#33CC88")) +
+  scale_size_continuous(name = "LOD Score") +
+  theme_bw() +
+  scale_x_continuous(breaks = GRCm39_index$midpoint_cumul, 
+                     labels = GRCm39_index$chr,
+                     minor_breaks = c(0,GRCm39_index$start_cumul,GRCm39_index["X","start_cumul"]+GRCm39_index["X","length"])) +
+  scale_y_continuous(breaks = GRCm39_index$midpoint_cumul, labels = GRCm39_index$chr,
+                     minor_breaks = c(0,GRCm39_index$start_cumul,GRCm39_index["X","start_cumul"]+GRCm39_index["X","length"])) +
+  xlab("QTL Position") +
+  ylab("Gene Position") +
+  ggtitle("Ntg pQTLs (14 months)") +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_line(color = "#CCCCCC"))
+
+pqtl_plot_ntg
+```
+
+Finding Ntg trans bands with sliding 5 Mb window analysis.
+
+```{r ntg_5Mb_sliding_window}
+windowed_results =  adbxd_pqtl_ntg_peaks_avg[which(adbxd_pqtl_ntg_peaks_avg$lod > 3),] |>
+  group_by(chr) |>
+  mutate(window_1 = mean_ps %/% 5,
+         window_2 =  (2.5 + mean_ps) %/% 5)
+
+# Getting sliding window count of significant QTL.
+window1_results = windowed_results |>
+  group_by(chr, window_1, protein) |>
+  summarize(has_sig = ifelse(length(which(lod >= 3)) == 0, 0, 1)) |>
+  group_by(chr, window_1) |>
+  summarize(sig = sum(has_sig)) |>
+  mutate(window_midpoint = (window_1 * 5) + 2.5)
+
+window2_results = windowed_results |>
+  group_by(chr, window_2, protein) |>
+  summarize(has_sig = ifelse(length(which(lod >= 3)) == 0, 0, 1)) |>
+  group_by(chr, window_2) |>
+  summarize(sig = sum(has_sig)) |>
+   mutate(window_midpoint = window_2 * 5)
+
+# Binding windowed results together.
+window_results_ntg = rbind(window1_results[,-2],
+                             window2_results[,-2]) |>
+  arrange(chr, window_midpoint)
+window_results_ntg$window_cumul_ps = window_results_ntg$window_midpoint + GRCm39_index[window_results_ntg$chr,"start_cumul"]
+window_results_ntg$chr = factor(window_results_ntg$chr,
+                                  levels = c(1:19,"X"),
+                                  ordered = TRUE)
+
+saveRDS(window_results_ntg, "./data/adbxd_ntg_pqtl_months14_windows_5mb.RDS")
+
+# Plotting windowed results
+windowed_plot_ntg = ggplot(data = window_results_ntg, aes(x = window_cumul_ps, 
+                                                              y = sig, 
+                                                              fill = chr)) +
+  geom_area() +
+  scale_fill_manual(values = rep(c("#008FC0","#05396B"), times = 10)) +
+  theme_bw() +
+  scale_x_continuous(breaks = GRCm39_index$midpoint_cumul, 
+                     labels = GRCm39_index$chr, 
+                     minor_breaks = c(0,GRCm39_index$start_cumul,GRCm39_index["X","start_cumul"]+GRCm39_index["X","length"])) +
+  theme(panel.grid.major = element_line(color = "#FFFFFF"),
+        panel.grid.minor.y = element_line(color = "#FFFFFF"),
+        legend.position = "none") +
+  xlab("Chromosome") +
+  ylab("Number Significant pQTL (LOD > 3)") +
+  ggtitle("Ntg pQTL")
+windowed_plot_ntg
+```
+
+
+Finding peaks for 5xFAD
+
+```{r find_5xfad_peaks_1p5_lod_drop}
+lod_score_thresh = 3.0
+lod_score_drop = 1.5
+
+adbxd_pqtl_5xfad_peaks = adbxd_pqtl_5xfad |>
+  group_by(protein, chr) |> arrange(ps) |>
+  mutate(index = 1:length(lod)) |> 
+  mutate(is_peak = index %in% (1 + unlist(qtl2:::.find_peaks(lod, 
+                                                             lod_score_thresh, 
+                                                             lod_score_drop)))) |>
+  filter(is_peak) |>
+  arrange(protein, chr, ps)
+adbxd_pqtl_5xfad_peaks = as.data.frame(adbxd_pqtl_5xfad_peaks)
+adbxd_pqtl_5xfad_peaks$n_peak = rep(0, times = nrow(adbxd_pqtl_5xfad_peaks))
+peak_n = 1
+
+for (i in seq_len(nrow(adbxd_pqtl_5xfad_peaks))) {
+  if (i == 1) {
+    adbxd_pqtl_5xfad_peaks[i,"n_peak"] = peak_n
+    chr_i_m1 = adbxd_pqtl_5xfad_peaks[i,"chr"]
+    prot_i_m1 = adbxd_pqtl_5xfad_peaks[i,"protein"]
+    ind_i_m1 = adbxd_pqtl_5xfad_peaks[i,"index"]
+    lod_i_m1 = adbxd_pqtl_5xfad_peaks[i,"lod"]
+  } else {
+    chr_i = adbxd_pqtl_5xfad_peaks[i,"chr"]
+    prot_i = adbxd_pqtl_5xfad_peaks[i,"protein"]
+    ind_i = adbxd_pqtl_5xfad_peaks[i,"index"]
+    lod_i = adbxd_pqtl_5xfad_peaks[i,"lod"]
+    if (chr_i == chr_i_m1 &
+        prot_i == prot_i_m1 &
+        ind_i == (1 + ind_i_m1) &
+        lod_i == lod_i_m1) {
+      adbxd_pqtl_5xfad_peaks[i,"n_peak"] = peak_n
+    } else {
+      peak_n = peak_n + 1
+      adbxd_pqtl_5xfad_peaks[i,"n_peak"] = peak_n
+    }
+    chr_i_m1 = chr_i
+    prot_i_m1 = prot_i
+    ind_i_m1 = ind_i
+    lod_i_m1 = lod_i
+  }
+}
+
+adbxd_pqtl_5xfad_peaks_avg = adbxd_pqtl_5xfad_peaks |>
+  group_by(protein, chr, n_peak) |>
+  summarize(mean_ps = mean(ps) / 1e6,
+            rsids = paste(rs, sep = "", collapse = ";"),
+            lod = median(lod))
+adbxd_pqtl_5xfad_peaks_avg = as.data.frame(adbxd_pqtl_5xfad_peaks_avg)
+adbxd_pqtl_5xfad_peaks_avg$qtl_cumu_ps = adbxd_pqtl_5xfad_peaks_avg$mean_ps + GRCm39_index[adbxd_pqtl_5xfad_peaks_avg$chr,"start_cumul"]
+adbxd_pqtl_5xfad_peaks_avg$prot_chr = adbxd_coord_df_filtered[adbxd_pqtl_5xfad_peaks_avg$protein,"chromosome_name_gene"]
+adbxd_pqtl_5xfad_peaks_avg$prot_ps = ifelse(adbxd_coord_df_filtered[adbxd_pqtl_5xfad_peaks_avg$protein,"strand_gene"] == 1,
+                                          adbxd_coord_df_filtered[adbxd_pqtl_5xfad_peaks_avg$protein,"start_position_gene"],
+                                          adbxd_coord_df_filtered[adbxd_pqtl_5xfad_peaks_avg$protein,"end_position_gene"]) / 1e6
+adbxd_pqtl_5xfad_peaks_avg$prot_cum_ps = adbxd_pqtl_5xfad_peaks_avg$prot_ps + GRCm39_index[adbxd_pqtl_5xfad_peaks_avg$prot_chr,"start_cumul"]
+adbxd_pqtl_5xfad_peaks_avg$is_cis = adbxd_pqtl_5xfad_peaks_avg$chr == adbxd_pqtl_5xfad_peaks_avg$prot_chr &
+  abs(adbxd_pqtl_5xfad_peaks_avg$mean_ps - adbxd_pqtl_5xfad_peaks_avg$prot_ps) <= 25
+```
+
+Finding 5xFAD peaks in trans with GSR (P47791).
+
+```{r}
+GSR = "P47791"
+GSR_peak = adbxd_pqtl_5xfad_peaks_avg[which(adbxd_pqtl_5xfad_peaks_avg$protein == "P47791" & adbxd_pqtl_5xfad_peaks_avg$mean_ps < 40 & adbxd_pqtl_5xfad_peaks_avg$mean_ps > 15 & adbxd_pqtl_5xfad_peaks_avg$chr == "8"),]
+GSR_peak_chr = GSR_peak[,"chr"]
+GSR_peak_location = GSR_peak[,"mean_ps"]
+
+adbxd_pqtl_5xfad_peaks_avg$is_GSR_trans = rep(FALSE, times = nrow(adbxd_pqtl_5xfad_peaks_avg))
+adbxd_pqtl_5xfad_peaks_avg[which(adbxd_pqtl_5xfad_peaks_avg$chr == GSR_peak_chr & adbxd_pqtl_5xfad_peaks_avg$mean_ps > (GSR_peak_location - 15) & adbxd_pqtl_5xfad_peaks_avg$mean_ps < (GSR_peak_location + 15)),"is_GSR_trans"] = TRUE
+
+saveRDS(adbxd_pqtl_5xfad_peaks_avg, "./data/adbxd_pqtl_5xfad_months14_peaks.RDS")
+```
+
+Getting trans band annotation
+
+```{r}
+trans_band_proteins = adbxd_pqtl_5xfad_peaks_avg |>
+  filter(is_GSR_trans) |>
+  pull(protein) |>
+  unique()
+
+trans_band_proteins = data.frame(uniprot = trans_band_proteins,
+                                 id = rep("", times = length(trans_band_proteins)))
+
+for (i in seq_len(nrow(trans_band_proteins))) {
+  uniprot_i = trans_band_proteins[i,"uniprot"]
+  trans_band_proteins[i,"id"] = adbxd_annot_list_uniprot[[uniprot_i]]$id
+}
+
+trans_band_proteins$id = gsub("_MOUSE$","",trans_band_proteins$id)
+row.names(trans_band_proteins) = trans_band_proteins$uniprot
+
+adbxd_pqtl_5xfad_peaks_avg$label = trans_band_proteins[adbxd_pqtl_5xfad_peaks_avg$protein,"id"]
+adbxd_pqtl_5xfad_peaks_avg$label = ifelse(adbxd_pqtl_5xfad_peaks_avg$is_GSR_trans, adbxd_pqtl_5xfad_peaks_avg$label, NA)
+adbxd_pqtl_5xfad_peaks_avg$label = ifelse(adbxd_pqtl_5xfad_peaks_avg$is_GSR_trans & !duplicated(adbxd_pqtl_5xfad_peaks_avg$label), adbxd_pqtl_5xfad_peaks_avg$label, NA)
+```
+
+Plotting 5xFAD peaks.
+
+```{r plot_5xfad_peaks}
+library("ggrepel")
+pqtl_plot_5xfad = ggplot(data = adbxd_pqtl_5xfad_peaks_avg[which(adbxd_pqtl_5xfad_peaks_avg$lod > 4 & !is.na(adbxd_pqtl_5xfad_peaks_avg$is_cis)),], 
+       aes(x = qtl_cumu_ps, 
+           y = prot_cum_ps, 
+           size = lod,
+           color = is_GSR_trans,
+           label = label)) +
+  geom_abline(slope = 1, 
+              intercept = 0, 
+              linetype = "dashed",
+              color = "#AAAAAA") +
+  geom_point(alpha = 0.5) +
+  geom_label_repel(size = 4) +
+  scale_color_manual(name = "GSHR trans",
+                     values = c("#999999","#CC3333")) + 
+  scale_size_continuous(name = "LOD Score") +
+  theme_bw() +
+  scale_x_continuous(breaks = GRCm39_index$midpoint_cumul, 
+                     labels = GRCm39_index$chr,
+                     minor_breaks = c(0,GRCm39_index$start_cumul,GRCm39_index["X","start_cumul"]+GRCm39_index["X","length"])) +
+  scale_y_continuous(breaks = GRCm39_index$midpoint_cumul, labels = GRCm39_index$chr,
+                     minor_breaks = c(0,GRCm39_index$start_cumul,GRCm39_index["X","start_cumul"]+GRCm39_index["X","length"])) +
+  xlab("QTL Position") +
+  ylab("Gene Position") +
+  ggtitle("5xFAD pQTLs (14 months)") +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_line(color = "#CCCCCC"))
+
+pqtl_plot_5xfad
+```
+
+Finding 5xFAD trans bands with sliding 5 Mb window analysis.
+
+```{r 5xfad_5Mb_sliding_window}
+windowed_results =  adbxd_pqtl_5xfad_peaks_avg[which(adbxd_pqtl_5xfad_peaks_avg$lod > 3),] |>
+  group_by(chr) |>
+  mutate(window_1 = mean_ps %/% 5,
+         window_2 =  (2.5 + mean_ps) %/% 5)
+
+# Getting sliding window count of significant QTL.
+window1_results = windowed_results |>
+  group_by(chr, window_1, protein) |>
+  summarize(has_sig = ifelse(length(which(lod >= 3)) == 0, 0, 1)) |>
+  group_by(chr, window_1) |>
+  summarize(sig = sum(has_sig)) |>
+  mutate(window_midpoint = (window_1 * 5) + 2.5)
+
+window2_results = windowed_results |>
+  group_by(chr, window_2, protein) |>
+  summarize(has_sig = ifelse(length(which(lod >= 3)) == 0, 0, 1)) |>
+  group_by(chr, window_2) |>
+  summarize(sig = sum(has_sig)) |>
+   mutate(window_midpoint = window_2 * 5)
+
+# Binding windowed results together.
+window_results_5xfad = rbind(window1_results[,-2],
+                             window2_results[,-2]) |>
+  arrange(chr, window_midpoint)
+window_results_5xfad$window_cumul_ps = window_results_5xfad$window_midpoint + GRCm39_index[window_results_5xfad$chr,"start_cumul"]
+window_results_5xfad$chr = factor(window_results_5xfad$chr,
+                                  levels = c(1:19,"X"),
+                                  ordered = TRUE)
+
+saveRDS(window_results_5xfad, "./data/adbxd_5xfad_pqtl_months14_windows_5mb.RDS")
+
+# Plotting windowed results
+windowed_plot_5xfad = ggplot(data = window_results_5xfad, aes(x = window_cumul_ps, 
+                                                              y = sig, 
+                                                              fill = chr)) +
+  geom_area() +
+  scale_fill_manual(values = rep(c("#008FC0","#05396B"), times = 10)) +
+  theme_bw() +
+  scale_x_continuous(breaks = GRCm39_index$midpoint_cumul, 
+                     labels = GRCm39_index$chr, 
+                     minor_breaks = c(0,GRCm39_index$start_cumul,GRCm39_index["X","start_cumul"]+GRCm39_index["X","length"])) +
+  theme(panel.grid.major = element_line(color = "#FFFFFF"),
+        panel.grid.minor.y = element_line(color = "#FFFFFF"),
+        legend.position = "none") +
+  xlab("Chromosome") +
+  ylab("Number Significant pQTL (LOD > 3)") +
+  ggtitle("5xFAD pQTL")
+windowed_plot_5xfad
+```
+

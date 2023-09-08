@@ -1,0 +1,90 @@
+---
+title: "AD-BXD Y Haplotype Resilience"
+output:
+  workflowr::wflow_html:
+    toc: true
+editor_options:
+  chunk_output_type: console
+bibliography: references.bib
+---
+
+### Loading Data
+
+Loading libraries
+
+```{r libraries}
+library("limma")
+library("qvalue")
+library("ggplot2")
+library("ggbeeswarm")
+library("ggrepel")
+library("ggtext")
+library("cowplot")
+library("cliqueR")
+library("WGCNA")
+library("tidyverse")
+library("MASS")
+library("qtl2")
+library("pcaMethods")
+library("topGO")
+source("./code/ggplot_pub_themes.R")
+```
+
+Loading proteome and genotype data.
+
+```{r load_proteome_data}
+adbxd_hippo_pgroup            = readRDS("./data/adbxd_hippo_pgroup_combat_corrected_2023-01-31.RDS")
+adbxd_hippo_sampanno          = readRDS("./data/adbxd_hippo_sampanno_quantnorm.RDS")
+adbxd_sampanno_all            = readRDS("./data/adbxd_hippo_sampanno_all.RDS")
+adbxd_hippo_pgroup_annotation = readRDS("./data/adbxd_hippo_pgroup_annotation.RDS")
+adbxd_annot_list_coordinates  = readRDS("./data/adbxd_uniprot_coordinates.RDS")
+adbxd_annot_list_uniprot      = readRDS("./data/adbxd_uniprot_alldata.RDS")
+adbxd_coord_df                = readRDS("./data/adbxd_uniprot_coord_df.RDS")
+adbxd_genotypes               = readRDS("./data/bxd_geno_data.RDS")
+adbxd_geno_meta               = readRDS("./data/bxd_geno_meta.RDS")
+adbxd_5xfad_14mo_resilience   = readRDS("./data/adbxd_5xfad_14mo_resilience.RDS")
+row.names(adbxd_5xfad_14mo_resilience) = adbxd_5xfad_14mo_resilience$sample_id
+```
+
+Getting rs46326766 genotype in the sample annotation data and filtering for 14-month-old 5xFAD animals.
+
+```{r}
+adbxd_hippo_sampanno$rs46326766 = ifelse(!is.na(adbxd_hippo_sampanno$strain),
+                                         as.data.frame(t(adbxd_genotypes))[adbxd_hippo_sampanno$strain,"rs46326766"],
+                                         NA)
+adbxd_hippo_sampanno_5xfad_months14 = adbxd_hippo_sampanno |>
+  filter(age == "Months14" & genotype == "5xFAD") |>
+  mutate(rs46326766 = ifelse(rs46326766 == 1, "D2","B6")) |>
+  as.data.frame()
+
+adbxd_hippo_sampanno_5xfad_months14$resilience = adbxd_5xfad_14mo_resilience[row.names(adbxd_hippo_sampanno_5xfad_months14),"resilience"]
+```
+
+
+Testing Y chromosome haplotype resilience in males.
+
+```{r resilience_regression}
+adbxd_hippo_sampanno_5xfad_months14_male = adbxd_hippo_sampanno_5xfad_months14 |>
+  filter(sex == "Male")
+
+t.test(resilience ~ rs46326766, data = adbxd_hippo_sampanno_5xfad_months14_male)
+```
+Plotting resilience by Y chromosome haplotype
+
+```{r}
+library("ggplot2")
+library("ggbeeswarm")
+ggplot(data = adbxd_hippo_sampanno_5xfad_months14_male, 
+       aes(x = rs46326766, 
+           y = resilience, 
+           color = rs46326766)) + 
+  geom_boxplot(outlier.color = NA) + 
+  geom_beeswarm() +
+  scale_color_manual(values = c("#000000","#999999")) +
+  theme_bw() +
+  theme(panel.grid = element_line(color = "#FFFFFF"),
+        legend.position = "none") +
+  ylab("Resilience Score") +
+  ggtitle("Resilience by Y Chromosome Haplotype in Males")
+```
+

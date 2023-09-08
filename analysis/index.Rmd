@@ -1,0 +1,29 @@
+---
+title: "Home"
+site: workflowr::wflow_site
+output:
+  workflowr::wflow_html:
+    toc: false
+editor_options:
+  chunk_output_type: console
+bibliography: references.bib
+---
+
+This project utilizes proteomics data collected i AD-BXD strains. The AD-BXD population is an F1 cross of specific BXD strains with the 5xFAD transgene [@neuner2019].
+
+These analyses utilize a Data Independent Acquisition (DIA) proteomics dataset that has been collected by the [MacCoss Lab at the University of Washington](https://www.maccosslab.org/). Signal processing was performed in Skyline by MacCoss Lab members Gennifer Merrihew and Jae Park. In any publication, we will require careful coordination with Michael MacCoss and his lab to draft an appropriate Methods section.
+
+This [R Markdown](https://rmarkdown.rstudio.com/) site uses the [workflowR framework](https://workflowr.github.io/workflowr/) to track Michael C. Saul's work in the Computational Sciences group at JAX.
+
+## Analysis
+
+-   [Basic data wrangling and proteome annotation](100_basic_data_wrangling.html)
+-   [Resilience Behavioral Analysis (Figure 1)](106_resilience_behavior.html)
+-   [Protein Abundance Analysis (Figure 2)](107_protein_abundance.html)
+-   [pQTL Analysis (summary of analysis work)](105_pqtl_mapping.html)
+-   [pQTL Trans Bands (Figure 3)](108_pqtl_trans_bands.html)
+-   [Protein Paraclique Analysis (Figure 4)](109_protein_network.html)
+
+## Figures
+
+## Literature Cited

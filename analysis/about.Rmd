@@ -1,0 +1,10 @@
+---
+title: "About"
+output:
+  workflowr::wflow_html:
+    toc: false
+editor_options:
+  chunk_output_type: console
+---
+
+The data here are DIA proteomics data. This analysis examines the role of translated proteins in age and in AD genetics in BXD mice.

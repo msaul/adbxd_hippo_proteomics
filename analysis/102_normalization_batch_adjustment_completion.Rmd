@@ -1,0 +1,284 @@
+---
+title: "Data Batch Correction Script 2"
+output:
+  workflowr::wflow_html:
+    toc: true
+editor_options:
+  chunk_output_type: console
+bibliography: references.bib
+---
+
+The previous step is [initial batch correction](101_normalization_batch_adjustment.html).
+
+### Hippocampus Proteome Batch Correction: Part 2
+
+Loading in clean data.
+
+```{r load_hippo_proteome}
+library("proBatch")
+library("HarmonizR")
+library("ggplot2")
+library("tidyverse")
+
+adbxd_hippo_quant = readRDS("./data/adbxd_hippo_peptide_quantnorm.RDS")
+adbxd_hippo_sampanno = readRDS("./data/adbxd_hippo_sampanno_quantnorm.RDS")
+adbxd_hippo_sampanno_tibble = as_tibble(adbxd_hippo_sampanno)
+
+adbxd_hippo_color_list = readRDS( "./data/adbxd_hippo_color_list.RDS")
+```
+
+The Loess smoothing step does not run in serial in any small amount of time. The script was parallelized on the cluster using the script [`./code/loess_correct_1to1500.R`](./code/loess_correct_1to1500.R). The content of this script is below (not evaluated).
+
+**Note: the below script uses relative paths to ensure that `workflowr` does not tag it as irreproducible, but the script that runs on the cluster uses absolute paths.**
+
+```{r loess_script_cluster, eval=FALSE}
+# Loess correct: 1 to 1500
+# Michael C. Saul
+# michael.saul [at] jax.org
+# 2022-10-05
+
+# This script batch corrects the proteomics data in parallel.
+# It splits the proteomics data matrix into 1,500 smaller chunks.
+# These chunks run in parallel on the cluster.
+
+# The script makes use of a column index and a means of producing approximately
+# equal row indices.
+
+# Getting working directory
+setwd("./")
+
+# Loading libraries
+library("tidyverse")
+library("tibble")
+library("proBatch")
+
+# Loading the data
+adbxd_hippo_quant = readRDS("./data/adbxd_hippo_peptide_quantnorm.RDS")
+adbxd_hippo_sampanno = readRDS("./data/adbxd_hippo_sampanno_quantnorm.RDS")
+
+# Getting SLURM ID
+slurm_array_id = as.numeric(Sys.getenv("SLURM_ARRAY_TASK_ID"))
+
+# Getting information needed to subset the data.
+
+# Getting rows vector
+nrow_quant = nrow(adbxd_hippo_quant)
+rows_slurm_id = ((slurm_array_id - 1) %/% 15) + 1
+nrows_in_vector = ceiling(nrow_quant / 100)
+rows_vector = (1 + (rows_slurm_id * nrows_in_vector - nrows_in_vector)):ifelse(rows_slurm_id != 100, (rows_slurm_id * nrows_in_vector), nrow_quant)
+
+# Getting col vector
+cols_slurm_id = ((slurm_array_id - 1)  %% 15) + 1
+
+# Getting matrix slice
+adbxd_hippo_sampanno_subset = adbxd_hippo_sampanno[which(adbxd_hippo_sampanno$loess_correction_n == cols_slurm_id),]
+adbxd_hippo_sampanno_subset_tibble = as_tibble(adbxd_hippo_sampanno_subset)
+adbxd_hippo_quant_long = matrix_to_long(adbxd_hippo_quant[rows_vector,adbxd_hippo_sampanno$sample_id])
+
+# Running Loess regression
+adbxd_hippo_loess_long = adjust_batch_trend_df(adbxd_hippo_quant_long,
+                                               sample_annotation = adbxd_hippo_sampanno_subset_tibble,
+                                               batch_col = "batch",
+                                               order_col = "order")
+
+adbxd_hippo_loess = long_to_matrix(adbxd_hippo_loess_long)
+
+# Saving out data
+saveRDS(adbxd_hippo_loess,paste0("./data/loess/adbxd_hippo_loess_array_",slurm_array_id,".RDS"))
+```
+
+We used the following [`./code/loess_correct_1to1500.sh`](./code/loess_correct_1to1500.sh) script to run this script:
+
+```{sh loess_correct_shell, eval=FALSE}
+#!/bin/bash
+#SBATCH -p compute
+#SBATCH -N 1 # number of nodes
+#SBATCH -n 2 # number of cores
+#SBATCH --mem=16GB # memory pool for all cores
+#SBATCH -t 1-00:00 # time (D-HH:MM)
+#SBATCH -o ploess_%A-%a.out # STDOUT
+#SBATCH -e ploess_%A-%a.err # STDERR
+#SBATCH --array=1-1500%100
+
+# Using R v4.2.1
+R_CONTAINER="/home/saulm/singularity/rocker_rstudio_4.2.1.sif"
+module load singularity
+
+singularity exec $R_CONTAINER Rscript /projects/kaczorowski-lab/USERS/saulm/adbxd_proteomics/code/loess_correct_1to1500.R
+```
+
+Now reading Loess smoothed data back in and coercing to matrix
+
+```{r get_loess_matrix}
+# Putting the matrix back together as efficiently as possible.
+for (i in 1:1500) {
+  adbxd_hippo_loess_i = readRDS(paste0("./data/loess/adbxd_hippo_loess_array_",i,".RDS"))
+  if ((i %% 15) == 1) {
+    adbxd_hippo_loess_mat_i = adbxd_hippo_loess_i
+  } else {
+    adbxd_hippo_loess_mat_i = cbind(adbxd_hippo_loess_mat_i, adbxd_hippo_loess_i)
+  }
+  if ((i %% 15) == 0) {
+    if (i == 15) {
+      adbxd_hippo_loess = adbxd_hippo_loess_mat_i
+    } else {
+      adbxd_hippo_loess = rbind(adbxd_hippo_loess, adbxd_hippo_loess_mat_i)
+      rm(list = c("adbxd_hippo_loess_mat_i"))
+    }
+  }
+}
+
+# Reordering samples to match the quantile normalized matrix.
+adbxd_hippo_loess = adbxd_hippo_loess[,adbxd_hippo_sampanno_tibble$sample_id]
+adbxd_hippo_loess = adbxd_hippo_loess[row.names(adbxd_hippo_quant),]
+saveRDS(adbxd_hippo_loess, "./data/adbxd_hippo_loess_peptides.RDS")
+
+# Making a long version that can be used for tidyverse operations.
+adbxd_hippo_loess_long = matrix_to_long(adbxd_hippo_loess)
+adbxd_hippo_loess_long$batch = adbxd_hippo_sampanno[pull(adbxd_hippo_loess_long,FullRunName),"batch"]
+adbxd_hippo_loess_long$contract = adbxd_hippo_sampanno[pull(adbxd_hippo_loess_long,FullRunName),"contract"]
+```
+
+Compressing Loess corrected data to keep things clean.
+
+```{sh compress_loess}
+# tar cvfz /projects/kacorowski-lab/USERS/saulm/adbxd_proteomics/data/loess_correction_data.tar.gz /projects/kacorowski-lab/USERS/saulm/adbxd_proteomics/data/loess
+# rm -r /projects/kacorowski-lab/USERS/saulm/adbxd_proteomics/data/loess
+```
+
+Doing median centering discrete batch correction.
+
+```{r median_correction}
+# Running median correction on peptides
+adbxd_hippo_median = center_feature_batch_medians_dm(adbxd_hippo_loess,
+                                                     sample_annotation = adbxd_hippo_sampanno_tibble,
+                                                     batch_col = "batch")
+```
+
+Evaluating how well these steps worked.
+
+```{r evaluate_batch_correction}
+plot_hierarchical_clustering(adbxd_hippo_median,
+                             sample_annotation = adbxd_hippo_sampanno_tibble,
+                             color_list = adbxd_hippo_color_list,
+                             factors_to_plot = c("contract","batch_date","batch","sample_type",
+                                                 "age","sex","genotype","strain"),
+                             distance = "euclidean", agglomeration = "complete",
+                             label_samples = FALSE,  fill_the_missing = NULL)
+```
+
+### Doing protein-level summarization
+
+Using the `get_pgroup()` function as implemented by Jea Park from the MacCoss Group at UW. Using it both to run a protein group analysis with ComBat performed at the peptide level as well as ComBat performed at the protein level.
+
+```{r get_pgroup_hippo}
+library("pcaMethods")
+source("./code/get_pgroup.R")
+
+# Filtering duplicate peptides that are ambiguous
+peptides = data.frame(row.names = row.names(adbxd_hippo_loess),
+                      peptide_id = row.names(adbxd_hippo_loess),
+                      peptide = gsub("^(.*);(.*)@(.*)$","\\1",row.names(adbxd_hippo_loess)),
+                      peptide_modified = gsub("^(.*);(.*)@(.*)$","\\2",row.names(adbxd_hippo_loess)),
+                      protein_id = gsub("^(.*);(.*)@(.*)$","\\3",row.names(adbxd_hippo_loess)))
+duplicate_peptides = peptides |>
+  group_by(peptide) |>
+  summarize(n = length(unique(protein_id))) |>
+  filter(n > 1) |>
+  pull(peptide)
+unique_peptides = row.names(peptides[which(!(peptides$peptide %in% duplicate_peptides)),])
+```
+
+Imputing peptides and doing batch correction at the peptide level
+
+```{r impute_peptides}
+adbxd_hippo_nsamples = ncol(adbxd_hippo_loess)
+adbxd_hippo_loess_peptide_isna = is.na(adbxd_hippo_loess)
+adbxd_hippo_peptides_keep = which(rowSums(adbxd_hippo_loess_peptide_isna) <= (0.8 * adbxd_hippo_nsamples))
+adbxd_hippo_loess_filtered = adbxd_hippo_loess[adbxd_hippo_peptides_keep,]
+# Running ppca, which is lower complexity than bpca
+adbxd_hippo_loess_peptide_pca = pca(t(adbxd_hippo_loess_filtered),
+                                    method = "ppca", nPcs = 4)
+adbxd_hippo_loess_peptide_imputed = t(adbxd_hippo_loess_peptide_pca@completeObs)[row.names(adbxd_hippo_loess_filtered),colnames(adbxd_hippo_loess_filtered)]
+saveRDS(adbxd_hippo_loess_peptide_imputed, "./data/adbxd_hippo_loess_peptide_imputed.RDS")
+
+# Using ComBat to batch correct
+adbxd_hippo_peptide_combat_imputed = correct_with_ComBat_dm(adbxd_hippo_loess_peptide_imputed,
+                                                            sample_annotation = adbxd_hippo_sampanno_tibble,
+                                                            batch_col = "batch")
+
+# Taking imputed data out of ComBat corrected data
+adbxd_hippo_peptide_combat = adbxd_hippo_peptide_combat_imputed
+adbxd_hippo_peptide_combat[which(is.na(adbxd_hippo_loess_filtered), arr.ind = TRUE)] = NA
+
+saveRDS(adbxd_hippo_peptide_combat, "./data/adbxd_hippo_peptide_combat.RDS")
+```
+
+Summarizing to protein groups and batch correcting data.
+
+```{r summarize_to_pgroup}
+# Summarizing to the protein group level
+adbxd_hippo_loess_pgroup = get_pgroup(adbxd_hippo_loess[unique_peptides,],
+                                      protGrp = TRUE,
+                                      average = TRUE)
+adbxd_hippo_loess_pgroup_isna = is.na(adbxd_hippo_loess_pgroup)
+
+# Changing NaN to NA
+adbxd_hippo_loess_pgroup[which(adbxd_hippo_loess_pgroup_isna, arr.ind = TRUE)] = NA
+adbxd_hippo_nsamples = ncol(adbxd_hippo_loess_pgroup)
+
+# Filtering protein groups with > 80% missingness
+adbxd_hippo_keep = which(rowSums(adbxd_hippo_loess_pgroup_isna) <= (0.8 * adbxd_hippo_nsamples))
+
+adbxd_hippo_loess_pgroup_filtered = adbxd_hippo_loess_pgroup[adbxd_hippo_keep,]
+
+# Imputing missing protein groups with PCA
+adbxd_hippo_loess_pgroup_pca = pca(t(adbxd_hippo_loess_pgroup_filtered), 
+                                   method = "bpca", nPcs = 4)
+adbxd_hippo_loess_pgroup_imputed = t(adbxd_hippo_loess_pgroup_pca@completeObs)[row.names(adbxd_hippo_loess_pgroup_filtered),colnames(adbxd_hippo_loess_pgroup_filtered)]
+
+# Using ComBat to batch correct
+adbxd_hippo_pgroup_combat_imputed = correct_with_ComBat_dm(adbxd_hippo_loess_pgroup_imputed,
+                                                           sample_annotation = adbxd_hippo_sampanno_tibble,
+                                                           batch_col = "batch")
+
+# Taking imputed data out of ComBat corrected data
+adbxd_hippo_pgroup_combat = adbxd_hippo_pgroup_combat_imputed
+adbxd_hippo_pgroup_combat[which(is.na(adbxd_hippo_loess_pgroup_filtered), arr.ind = TRUE)] = NA
+```
+
+Looking at the protein group abundance prior to batch correction.
+
+```{r hierarcical_clust_pgroup_prior}
+plot_hierarchical_clustering(adbxd_hippo_loess_pgroup_filtered,
+                             sample_annotation = adbxd_hippo_sampanno_tibble,
+                             color_list = adbxd_hippo_color_list,
+                             factors_to_plot = c("contract","batch_date","batch","sample_type",
+                                                 "age","sex","genotype","strain"),
+                             distance = "euclidean", agglomeration = "complete",
+                             label_samples = FALSE, fill_the_missing = NULL,
+                             plot_title = "Uncorrected Protein Groups")
+```
+
+Looking at the results of running ComBat correction after protein group summarization.
+
+```{r hierarcical_clust_pgroup_after}
+plot_hierarchical_clustering(adbxd_hippo_pgroup_combat,
+                             sample_annotation = adbxd_hippo_sampanno_tibble,
+                             color_list = adbxd_hippo_color_list,
+                             factors_to_plot = c("contract","batch_date","batch","sample_type",
+                                                 "age","sex","genotype","strain"),
+                             distance = "euclidean", agglomeration = "complete",
+                             label_samples = FALSE, fill_the_missing = NULL,
+                             plot_title = "ComBat Corrected Protein Groups")
+```
+
+Saving protein group data.
+
+```{r save_data}
+saveRDS(adbxd_hippo_loess_pgroup_filtered,"./data/adbxd_hippo_pgroup_uncorrected.RDS")
+saveRDS(adbxd_hippo_pgroup_combat_imputed,"./data/adbxd_hippo_pgroup_combat_imputed.RDS")
+saveRDS(adbxd_hippo_pgroup_combat,"./data/adbxd_hippo_pgroup_combat_after.RDS")
+```
+
+The next script [visualizes data and analyzes heritability](./docs/103_heritability_analysis.html)

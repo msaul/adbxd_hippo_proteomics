@@ -1,0 +1,621 @@
+---
+title: "Basic Data Wrangling"
+output:
+  workflowr::wflow_html:
+    toc: true
+editor_options:
+  chunk_output_type: console
+bibliography: references.bib
+---
+
+### Hippocampus Proteome, Annotation, and Metadata
+
+The hippocampus proteomics data are divided into two: Contract 1 and Contract 2.
+
+#### Loading Sample Annotation
+
+##### Loading C1 metadata
+
+First, loading hippocampus C1 metadata.
+
+```{r load_hippo_c1_metadata}
+library("readxl")
+library("janitor")
+library("tidyverse")
+library("lubridate")
+
+# Loading in C1 metadata
+adbxd_hippo_c1_sampanno = read_xlsx(path = "./data/raw/MouAD-DIA-0.95-Hipp-B1-B21-MetaData.xlsx",
+                           sheet = "MouAD-DIA-0.95-Hipp-B1-B21-Meta") |>
+  clean_names()
+adbxd_hippo_c1_sampanno = as.data.frame(adbxd_hippo_c1_sampanno)
+
+# Cleaning up C1 sample IDs
+adbxd_hippo_c1_sampanno$sample_id = gsub("^(\\w{3,4})(\\d{2,3}.?)$","\\1_\\2",adbxd_hippo_c1_sampanno$replicate)
+adbxd_hippo_c1_sampanno$sample_id = gsub("^MBR_(0[78])$","MBRH_\\1",adbxd_hippo_c1_sampanno$sample_id)
+row.names(adbxd_hippo_c1_sampanno) = adbxd_hippo_c1_sampanno$sample_id
+adbxd_hippo_c1_sampanno$contract = rep("C1", times = nrow(adbxd_hippo_c1_sampanno))
+adbxd_hippo_c1_sampanno$batch = paste0("C1_", formatC(adbxd_hippo_c1_sampanno$batch,width=2,flag="0"))
+
+# Getting original sample ID name
+colnames(adbxd_hippo_c1_sampanno)[grep("^replicate", colnames(adbxd_hippo_c1_sampanno))] = "original_sample_id"
+
+# Cleaning up C1 sex
+adbxd_hippo_c1_sampanno$sex = ifelse(adbxd_hippo_c1_sampanno$sex == "NA", NA, adbxd_hippo_c1_sampanno$sex)
+
+# Cleaning up C1 age
+adbxd_hippo_c1_sampanno$age = sapply(seq_along(adbxd_hippo_c1_sampanno$age), 
+                                     FUN = function(X) {switch(as.character(adbxd_hippo_c1_sampanno$age[X]),
+                                                               "Young" = "Months06",
+                                                               "Old" = "Months14",
+                                                               "NA" = NA)})
+
+# Cleaning up C1 genotype
+adbxd_hippo_c1_sampanno$genotype = sapply(seq_along(adbxd_hippo_c1_sampanno$genotype), 
+                                     FUN = function(X) {switch(as.character(adbxd_hippo_c1_sampanno$genotype[X]),
+                                                               "FAD" = "5xFAD",
+                                                               "WT" = "Ntg",
+                                                               "NA" = NA)})
+
+# Cleaning up C1 condition
+adbxd_hippo_c1_sampanno$condition = gsub("^Mouse Brain Reference$", "Mouse brain reference pool", adbxd_hippo_c1_sampanno$condition)
+adbxd_hippo_c1_sampanno$condition = gsub("^Mouse Hipp Reference$", "Hippocampus reference pool", adbxd_hippo_c1_sampanno$condition)
+
+# Fixing strain information
+adbxd_hippo_c1_sampanno$strain = ifelse(adbxd_hippo_c1_sampanno$strain == "NA" | adbxd_hippo_c1_sampanno$strain == "na", 
+                                     NA, adbxd_hippo_c1_sampanno$strain)
+adbxd_hippo_c1_sampanno$strain = gsub("^(\\d+)$", "BXD\\1", adbxd_hippo_c1_sampanno$strain)
+adbxd_hippo_c1_sampanno$strain = gsub("^B6$", "C57BL/6J", adbxd_hippo_c1_sampanno$strain)
+adbxd_hippo_c1_sampanno$strain = gsub("^D2$", "DBA/2J", adbxd_hippo_c1_sampanno$strain)
+```
+
+##### Loading C2 metadata
+
+First, loading hippocampus C2 sample annotation.
+
+```{r load_hippo_c2_sampanno}
+# Loading in c2 sampanno
+adbxd_hippo_c2_sampanno = read_xlsx(path = "./data/raw/MouAD-Contract2-2021-Hipp-MetaData-All.xlsx",
+                           sheet = "Hipp-Meta-UW-MatchC1") |>
+  clean_names()
+adbxd_hippo_c2_sampanno = as.data.frame(adbxd_hippo_c2_sampanno)
+
+# Cleaning up c2 sample IDs
+adbxd_hippo_c2_sampanno$sample_id =  gsub("-","_",adbxd_hippo_c2_sampanno$uw_sample_id)
+row.names(adbxd_hippo_c2_sampanno) = adbxd_hippo_c2_sampanno$sample_id
+adbxd_hippo_c2_sampanno$contract = rep("C2", times = nrow(adbxd_hippo_c2_sampanno))
+adbxd_hippo_c2_sampanno$batch = paste0("C2_", formatC(adbxd_hippo_c2_sampanno$batch, width=2, flag="0"))
+
+# Getting original sample ID name
+colnames(adbxd_hippo_c2_sampanno)[grep("^uw_sample_id", colnames(adbxd_hippo_c2_sampanno))] = "original_sample_id"
+
+# Cleaning up C2 sex
+colnames(adbxd_hippo_c2_sampanno)[grep("^sex",colnames(adbxd_hippo_c2_sampanno))] = "sex"
+adbxd_hippo_c2_sampanno$sex = sapply(seq_along(adbxd_hippo_c2_sampanno$sex), 
+                                     FUN = function(X) {switch(as.character(adbxd_hippo_c2_sampanno$sex[X]),
+                                                               "11" = "Female",
+                                                               "22" = "Male",
+                                                               "na" = NA)})
+
+# Cleaning up C2 age
+colnames(adbxd_hippo_c2_sampanno)[grep("^age",colnames(adbxd_hippo_c2_sampanno))] = "age"
+adbxd_hippo_c2_sampanno$age = sapply(seq_along(adbxd_hippo_c2_sampanno$age), 
+                                     FUN = function(X) {switch(as.character(adbxd_hippo_c2_sampanno$age[X]),
+                                                               "6" = "Months06",
+                                                               "14" = "Months14",
+                                                               "na" = NA)})
+
+# Cleaning up C2 genotype
+colnames(adbxd_hippo_c2_sampanno)[grep("^genotype",colnames(adbxd_hippo_c2_sampanno))] = "genotype"
+adbxd_hippo_c2_sampanno$genotype = sapply(seq_along(adbxd_hippo_c2_sampanno$genotype), 
+                                     FUN = function(X) {switch(as.character(adbxd_hippo_c2_sampanno$genotype[X]),
+                                                               "5" = "5xFAD",
+                                                               "0" = "Ntg",
+                                                               "na" = NA)})
+
+# Fixing strain information
+adbxd_hippo_c2_sampanno$strain = ifelse(adbxd_hippo_c2_sampanno$strain == "NA" | adbxd_hippo_c2_sampanno$strain == "na", 
+                                     NA, adbxd_hippo_c2_sampanno$strain)
+adbxd_hippo_c2_sampanno$strain = gsub("^(\\d+)$", "BXD\\1", adbxd_hippo_c2_sampanno$strain)
+adbxd_hippo_c2_sampanno$strain = gsub("^B6$", "C57BL/6J", adbxd_hippo_c2_sampanno$strain)
+adbxd_hippo_c2_sampanno$strain = gsub("^D2$", "DBA/2J", adbxd_hippo_c2_sampanno$strain)
+```
+
+##### Calculating sample order
+
+Getting raw sample annotation including date/time information for raw file creation, which can be used to find run order.
+
+```{r get_raw_sampanno}
+library("lubridate")
+adbxd_file_sampanno = read.table(file = "./data/raw/MouAD_raw_data_metadata.txt", sep = "\t", header = TRUE)
+
+# Getting raw sampanno
+adbxd_raw_sampanno = adbxd_file_sampanno[grep("400to1000-.*\\.raw$", adbxd_file_sampanno$Filename),]
+adbxd_raw_sampanno$original_sample_id = gsub("^.*400to1000-(.*)\\.raw$", "\\1", adbxd_raw_sampanno$Filename)
+adbxd_raw_sampanno$original_sample_id = gsub("^B\\d{1,2}-","", adbxd_raw_sampanno$original_sample_id)
+adbxd_raw_sampanno$original_sample_id = gsub("^MBRH(0[78])$","MBR\\1", adbxd_raw_sampanno$original_sample_id)
+row.names(adbxd_raw_sampanno) = adbxd_raw_sampanno$original_sample_id
+colnames(adbxd_raw_sampanno) = c("raw_filename","raw_filesize","raw_file_date_modified","original_sample_id")
+adbxd_raw_sampanno$raw_file_date_modified = dmy_hms(adbxd_raw_sampanno$raw_file_date_modified)
+
+# Getting mzML sampanno
+adbxd_mzML_sampanno = adbxd_file_sampanno[grep("400to1000-.*\\.mzML$", adbxd_file_sampanno$Filename),]
+adbxd_mzML_sampanno$original_sample_id = gsub("^.*400to1000-(.*)\\.mzML$", "\\1", adbxd_mzML_sampanno$Filename)
+adbxd_mzML_sampanno$original_sample_id = gsub("^B\\d{1,2}-","", adbxd_mzML_sampanno$original_sample_id)
+adbxd_mzML_sampanno$original_sample_id = gsub("^MBRH(0[78])$","MBR\\1", adbxd_mzML_sampanno$original_sample_id)
+row.names(adbxd_mzML_sampanno) = adbxd_mzML_sampanno$original_sample_id
+colnames(adbxd_mzML_sampanno) = c("mzML_filename","mzML_filesize","mzML_file_date_modified","original_sample_id")
+adbxd_mzML_sampanno$mzML_file_date_modified = dmy_hms(adbxd_mzML_sampanno$mzML_file_date_modified)
+```
+
+Creating unified C1/C2 sample annotation sheet.
+
+```{r unified_hippo_c1c2_sampanno}
+sampanno_cols = c("sample_id", "contract","batch", "strain", "sex", "age", "genotype", "condition","original_sample_id")
+adbxd_hippo_sampanno = rbind(adbxd_hippo_c1_sampanno[,sampanno_cols],
+                             adbxd_hippo_c2_sampanno[,sampanno_cols]) |>
+  arrange(contract, batch, sample_id)
+adbxd_hippo_sampanno = cbind(adbxd_hippo_sampanno,
+                             adbxd_raw_sampanno[adbxd_hippo_sampanno$original_sample_id,-4],
+                             adbxd_mzML_sampanno[adbxd_hippo_sampanno$original_sample_id,-4])
+adbxd_hippo_sampanno$batch_date = dmy(gsub("^(\\d{2})(\\w{3,4})(\\d{4})-Lumos.*$","\\1 \\2 \\3",adbxd_hippo_sampanno$raw_filename))
+```
+
+Bringing in header file data from the script [`get_ms_file_headers.R`](./code/get_ms_file_headers.R) Note: this script used the `rawrr` package and was run asynchronously from these data so that the raw data may be transferred to a different storage tier at a later date.
+
+```{r get_raw_file_headers_hippo}
+raw_header_files = read.table("./data/raw/raw_ms_file_headers.tsv", 
+                          sep = "\t", 
+                          header = TRUE) |> 
+  clean_names() |> 
+  mutate(creation_date = mdy_hms(creation_date, 
+                                 tz = 'America/Los_Angeles'))
+colnames(raw_header_files)[grep("sample_id",colnames(raw_header_files))] = "ms_sample_id"
+
+row.names(raw_header_files) = raw_header_files$raw_file
+adbxd_hippo_sampanno = cbind(adbxd_hippo_sampanno,
+                             raw_header_files[adbxd_hippo_sampanno$raw_filename,-1:-2])
+adbxd_hippo_sampanno = adbxd_hippo_sampanno |>
+  mutate(raw_file_date_modified = ymd_hms(raw_file_date_modified)) |>
+  group_by(batch) |>
+  mutate(batch_order = rank(creation_date)) |>
+  mutate(batch_elapsed = creation_date - creation_date[batch_order == 1])
+```
+
+##### Getting supplemental C2 annotation sheet
+
+```{r supplemental_c2_hippo_sampanno}
+adbxd_hippo_c2_sampanno_jax = read_xlsx(path = "./data/raw/MouAD-Contract2-2021-Hipp-MetaData-All.xlsx",
+                               sheet = "Hipp-Meta-Jax") |>
+  clean_names()
+adbxd_hippo_c2_sampanno_jax = as.data.frame(adbxd_hippo_c2_sampanno_jax)
+
+adbxd_hippo_c2_sampanno_uw = read_xlsx(path = "./data/raw/MouAD-Contract2-2021-Hipp-MetaData-All.xlsx",
+                                       sheet = "Hipp-Meta-UW-MatchC1") |>
+  clean_names()
+adbxd_hippo_c2_sampanno_uw = as.data.frame(adbxd_hippo_c2_sampanno_uw)
+adbxd_hippo_c2_sampanno_uw$uw_sample_id = gsub("-","_",adbxd_hippo_c2_sampanno_uw$uw_sample_id)
+adbxd_hippo_c2_sampanno_uw$jax_sample_id = as.numeric(ifelse(adbxd_hippo_c2_sampanno_uw$jax_sample_id == "na",NA,adbxd_hippo_c2_sampanno_uw$jax_sample_id))
+adbxd_hippo_c2_sampanno_uw$harvest_date = as.numeric(ifelse(adbxd_hippo_c2_sampanno_uw$harvest_date == "na", NA, adbxd_hippo_c2_sampanno_uw$harvest_date))
+adbxd_hippo_c2_sampanno_uw$harvest_date = janitor::excel_numeric_to_date(adbxd_hippo_c2_sampanno_uw$harvest_date, date_system = "modern")
+row.names(adbxd_hippo_c2_sampanno_uw) = adbxd_hippo_c2_sampanno_uw$uw_sample_id
+```
+
+##### Getting C1 behavioral data
+
+The Contract 1 behavioral data is compiled in a file by Niran Hadad. This file also includes a number of other pieces of data.
+
+```{r c1_behavioral_data_correspondence}
+adbxd_hippo_c1_sampanno_jax = read.csv("./data/raw/HC_ProteinData_wBehavior_wMetaData.csv")[,1:98] |> 
+  clean_names()
+sample_key = adbxd_hippo_sampanno[,c("original_sample_id","sample_id")] |>
+  as.data.frame() |>
+  column_to_rownames("original_sample_id")
+adbxd_hippo_c1_sampanno_jax$sample_id = sample_key[adbxd_hippo_c1_sampanno_jax$new_sample_id,"sample_id"]
+adbxd_hippo_c1_sampanno_jax = adbxd_hippo_c1_sampanno_jax[,c(ncol(adbxd_hippo_c1_sampanno_jax),1:(ncol(adbxd_hippo_c1_sampanno_jax)-1))]
+colnames(adbxd_hippo_c1_sampanno_jax)[2] = "original_sample_id"
+row.names(adbxd_hippo_c1_sampanno_jax) = adbxd_hippo_c1_sampanno_jax$sample_id
+adbxd_hippo_c1_sampanno_jax = adbxd_hippo_c1_sampanno_jax[,grep("^x", colnames(adbxd_hippo_c1_sampanno_jax), value = TRUE, invert = TRUE)]
+```
+
+##### Loading C2 Behavioral Data
+
+```{r load_behavioral_data}
+adbxd_cfc = read.csv("./data/behavior/CFC_ClimbMerge_ADBXDfilter_2022-06-17.csv") |>
+  clean_names() 
+adbxd_ymaze = read.csv("./data/behavior/YMaze_ClimbMerge_ADBXDfilter_2022-06-22.csv") |>
+  clean_names()
+```
+
+##### Adding Behavioral Data
+
+Adding in a few phenotypes:
+
+* Working Memory (`wm`): spontaneous alternations in the Y-maze
+* Contextual Fear Acquisition (`cfa`): slope of acquisition curve for contextual fear conditioning
+* Contextual Fear Memory (`cfm`): percent time freezing on test day of contextual fear conditioning
+
+Defining a couple of timeframes for data acquisition: 
+
+* `06mo`: phenotype at 6 months of age
+* `14mo`: phenotype at 14 months of age
+* `term`: phenotype at end of life
+
+```{r add_behavioral_data}
+# Coercing sample annotation to data frame
+adbxd_hippo_sampanno = as.data.frame(adbxd_hippo_sampanno)
+row.names(adbxd_hippo_sampanno) = adbxd_hippo_sampanno$sample_id
+
+# Making blank spots for behavior
+# adbxd_hippo_sampanno$wm_ymaze_06mo = rep(NA, times = nrow(adbxd_hippo_sampanno))
+# adbxd_hippo_sampanno$wm_ymaze_14mo = rep(NA, times = nrow(adbxd_hippo_sampanno))
+# adbxd_hippo_sampanno$wm_ymaze_term = rep(NA, times = nrow(adbxd_hippo_sampanno))
+adbxd_hippo_sampanno$cfa_term = rep(NA, times = nrow(adbxd_hippo_sampanno))
+adbxd_hippo_sampanno$cfm_term = rep(NA, times = nrow(adbxd_hippo_sampanno))
+
+# Starting with C1 samples
+adbxd_hippo_c1_sampanno_jax$ymaze_terminal = ifelse(adbxd_hippo_c1_sampanno_jax$age_harvested_6_young_14_old == 6,
+                                                    adbxd_hippo_c1_sampanno_jax$ymaze_spon_alt_6mo,
+                                                    adbxd_hippo_c1_sampanno_jax$ymaze_spon_alt_14mo)
+adbxd_hippo_c1_sampanno_jax$cfa_terminal = ifelse(adbxd_hippo_c1_sampanno_jax$age_harvested_6_young_14_old == 6,
+                                                    adbxd_hippo_c1_sampanno_jax$fc_6m_slope,
+                                                    adbxd_hippo_c1_sampanno_jax$fc_14m_slope)
+# adbxd_hippo_sampanno[row.names(adbxd_hippo_c1_sampanno_jax),"wm_ymaze_06mo"] = adbxd_hippo_c1_sampanno_jax$ymaze_spon_alt_6mo
+# adbxd_hippo_sampanno[row.names(adbxd_hippo_c1_sampanno_jax),"wm_ymaze_14mo"] = adbxd_hippo_c1_sampanno_jax$ymaze_spon_alt_14mo
+# adbxd_hippo_sampanno[row.names(adbxd_hippo_c1_sampanno_jax),"wm_ymaze_term"] = adbxd_hippo_c1_sampanno_jax$ymaze_terminal
+adbxd_hippo_sampanno[row.names(adbxd_hippo_c1_sampanno_jax),"cfa_term"] = adbxd_hippo_c1_sampanno_jax$cfa_terminal
+adbxd_hippo_sampanno[row.names(adbxd_hippo_c1_sampanno_jax),"cfm_term"] = adbxd_hippo_c1_sampanno_jax$cfm_terminal
+
+# Proceeding to C2 samples
+adbxd_hippo_c2_sampanno_behavior = adbxd_hippo_c2_sampanno_uw[grep("^.*reference pool$", adbxd_hippo_c2_sampanno_uw$condition, invert = TRUE),]
+row.names(adbxd_hippo_c2_sampanno_behavior) = as.numeric(adbxd_hippo_c2_sampanno_behavior$jax_sample_id)
+
+adbxd_ymaze_c2 = adbxd_ymaze |>
+  mutate(jax_sample_id = as.numeric(id),
+         dist_from_06mo = age_grp - 6,
+         dist_from_14mo = age_grp - 14) |>
+  filter(jax_sample_id %in% adbxd_hippo_c2_sampanno_behavior$jax_sample_id) |>
+  filter(abs(dist_from_06mo) <= 2 |  abs(dist_from_14mo) <= 2) |>
+  group_by(jax_sample_id) |>
+  summarize()
+
+adbxd_cfc$id = as.character(adbxd_cfc$id)
+adbxd_cfc = adbxd_cfc[which(adbxd_cfc$id %in% adbxd_hippo_c2_sampanno_behavior$jax_sample_id),]
+row.names(adbxd_cfc) = adbxd_cfc$id
+adbxd_hippo_c2_sampanno_behavior$cfa_term = adbxd_cfc[row.names(adbxd_hippo_c2_sampanno_behavior),"cfa_slope"]
+adbxd_hippo_c2_sampanno_behavior$cfm_term = adbxd_cfc[row.names(adbxd_hippo_c2_sampanno_behavior),"cfm_total"]
+row.names(adbxd_hippo_c2_sampanno_behavior) = adbxd_hippo_c2_sampanno_behavior$uw_sample_id
+adbxd_hippo_sampanno[row.names(adbxd_hippo_c2_sampanno_behavior),"cfa_term"] = adbxd_hippo_c2_sampanno_behavior$cfa_term
+adbxd_hippo_sampanno[row.names(adbxd_hippo_c2_sampanno_behavior),"cfm_term"] = adbxd_hippo_c2_sampanno_behavior$cfm_term
+
+
+# Selecting the last Y-maze data point based upon the hypothesis (to be confirmed)
+# that animals were re-tested when something went wrong in the y-maze
+```
+
+##### Saving Sample Annotation
+
+```{r save_wrangled_hippo_sampanno}
+saveRDS(adbxd_hippo_sampanno, "./data/adbxd_hippo_sampanno_all.RDS")
+saveRDS(adbxd_hippo_c1_sampanno,"./data/adbxd_hippo_c1_proteome_sampanno.RDS")
+saveRDS(adbxd_hippo_c1_sampanno_jax, "./data/adbxd_hippo_c1_sampanno_jax.RDS")
+saveRDS(adbxd_hippo_c2_sampanno,"./data/adbxd_hippo_c2_proteome_sampanno.RDS")
+saveRDS(adbxd_hippo_c2_sampanno_jax,"./data/adbxd_hippo_c2_proteome_jax_sampanno.RDS")
+saveRDS(adbxd_hippo_c2_sampanno_uw,"./data/adbxd_hippo_c2_proteome_uw_sampanno.RDS")
+```
+
+#### Loading Proteome Data
+
+Loading newest dataset (sent by Jea Park in April of 2023) where C1 and C2 samples were signal processed together and data were batch-corrected and protein group summarized by Jea.
+
+```{r}
+adbxd_hippo_pgroup_new = read.csv("./data/MouseAD_Saul-Hipp_CombinedLib-RefFASTA-20230404/out/MouAD_Hipp-CombinedChrLib_RefFASTA-Protein_BatchAdj.csv", row.names = 1)
+adbxd_hippo_pgroup_new = as.matrix(adbxd_hippo_pgroup_new)
+colnames(adbxd_hippo_pgroup_new) = gsub("^(\\w{3,4})(\\d{2,3}.*$)","\\1_\\2",colnames(adbxd_hippo_pgroup_new))
+colnames(adbxd_hippo_pgroup_new) = gsub("\\.","_",colnames(adbxd_hippo_pgroup_new))
+colnames(adbxd_hippo_pgroup_new)[which(colnames(adbxd_hippo_pgroup_new) %in% c("MBR_07","MBR_08"))] = c("MBRH_07","MBRH_08")
+adbxd_hippo_pgroup_new = adbxd_hippo_pgroup_new[,row.names(adbxd_hippo_sampanno)]
+```
+
+Getting row name annotations for these data.
+
+```{r}
+adbxd_hippo_pgroup_new_annot = data.frame(row.names = row.names(adbxd_hippo_pgroup_new),
+                                          peptides = gsub("^(.*) @ (.*)$","\\1",row.names(adbxd_hippo_pgroup_new)),
+                                          proteins = gsub("^(.*) @ (.*)$","\\2",row.names(adbxd_hippo_pgroup_new)))
+
+adbxd_hippo_pgroup_new_annot$peptides = gsub(", ", ";", adbxd_hippo_pgroup_new_annot$peptides)
+
+# Making columns to hold variables
+adbxd_hippo_pgroup_new_annot$n_peptides = rep(0, times = nrow(adbxd_hippo_pgroup_new_annot))
+adbxd_hippo_pgroup_new_annot$n_proteins = rep(0, times = nrow(adbxd_hippo_pgroup_new_annot))
+adbxd_hippo_pgroup_new_annot$source = rep("", times = nrow(adbxd_hippo_pgroup_new_annot))
+adbxd_hippo_pgroup_new_annot$uniprot = rep("", times = nrow(adbxd_hippo_pgroup_new_annot))
+adbxd_hippo_pgroup_new_annot$id = rep("", times = nrow(adbxd_hippo_pgroup_new_annot))
+
+# Looping through (likely could do better with an apply function, but I am tired)
+for (i in seq_len(nrow(adbxd_hippo_pgroup_new_annot))) {
+  adbxd_hippo_pgroup_new_annot[i,"n_peptides"] = length(unlist(strsplit(adbxd_hippo_pgroup_new_annot[i,"peptides"], ";")))
+  adbxd_hippo_pgroup_new_annot[i,"n_proteins"] = length(unlist(strsplit(adbxd_hippo_pgroup_new_annot[i,"proteins"], ",")))
+  adbxd_hippo_pgroup_new_annot[i,"source"] = paste(unique(gsub("^(.*)\\|(.*)\\|(.*)$","\\1",
+                                                           unlist(strsplit(adbxd_hippo_pgroup_new_annot[i,"proteins"], split =", ")))),
+                                               collapse = ";")
+  adbxd_hippo_pgroup_new_annot[i,"uniprot"] = paste(unique(gsub("^(.*)\\|(.*)\\|(.*)$","\\2",
+                                                           unlist(strsplit(adbxd_hippo_pgroup_new_annot[i,"proteins"], split =", ")))),
+                                               collapse = ";")
+  adbxd_hippo_pgroup_new_annot[i,"id"] = paste(unique(gsub("^(.*)\\|(.*)\\|(.*)$","\\3",
+                                                           unlist(strsplit(adbxd_hippo_pgroup_new_annot[i,"proteins"], split =", ")))),
+                                               collapse = ";")
+}
+
+adbxd_hippo_pgroup_new_annot$uniprot = gsub(" ", "_", adbxd_hippo_pgroup_new_annot$uniprot)
+
+row.names(adbxd_hippo_pgroup_new) = adbxd_hippo_pgroup_new_annot$uniprot
+```
+
+Getting peptide-level data for the same dataset.
+
+```{r get_peptides_new}
+adbxd_hippo_peptide_new = read.csv("./data/MouseAD_Saul-Hipp_CombinedLib-RefFASTA-20230404/out/MouAD_Hipp-CombinedChrLib_RefFASTA-Peptide_BatchAdj.csv", row.names = 1)
+adbxd_hippo_peptide_new = as.matrix(adbxd_hippo_peptide_new)
+
+# Fixing column names
+colnames(adbxd_hippo_peptide_new) = gsub("^(\\w{3,4})(\\d{2,3}.*$)","\\1_\\2",colnames(adbxd_hippo_peptide_new))
+colnames(adbxd_hippo_peptide_new) = gsub("\\.","_",colnames(adbxd_hippo_peptide_new))
+colnames(adbxd_hippo_peptide_new)[which(colnames(adbxd_hippo_peptide_new) %in% c("MBR_07","MBR_08"))] = c("MBRH_07","MBRH_08")
+
+# Fixing row names
+row.names(adbxd_hippo_peptide_new) = gsub(" @ ", "@", row.names(adbxd_hippo_peptide_new))
+row.names(adbxd_hippo_peptide_new) = gsub("Library Peptides$", "Library_Peptides", row.names(adbxd_hippo_peptide_new))
+
+# Getting annotation data frame
+adbxd_hippo_peptide_new_annot = data.frame(row.names = row.names(adbxd_hippo_peptide_new),
+                                           Peptide = gsub("^(.*)@(.*)$","\\1",row.names(adbxd_hippo_peptide_new)),
+                                           Protein = gsub("^(.*)@(.*)$","\\2",row.names(adbxd_hippo_peptide_new)))
+
+# Constraining to just the samples that are part of the annotation
+adbxd_hippo_peptide_new = adbxd_hippo_peptide_new[,adbxd_hippo_sampanno$sample_id]
+```
+
+Saving new proteome data.
+
+```{r save_proteome_data_new}
+saveRDS(adbxd_hippo_peptide_new, "./data/adbxd_hippo_peptide_new.RDS")
+saveRDS(adbxd_hippo_peptide_new_annot, "./data/adbxd_hippo_peptide_new_annot.RDS")
+
+saveRDS(adbxd_hippo_pgroup_new, "./data/adbxd_hippo_pgroup_new.RDS")
+saveRDS(adbxd_hippo_pgroup_new_annot, "./data/adbxd_hippo_pgroup_new_annot.RDS")
+```
+
+Next, loading hippocampus C2 proteome data.
+
+```{r load_hippo_c2_proteome_data}
+adbxd_hippo_c2_proteome = read.csv("./data/raw/20220504-MouAD-Hipp-C2-protGrp_batchadj.csv")
+adbxd_hippo_c2_annot = data.frame(row.names = adbxd_hippo_c2_proteome$Protein,
+                         protein_id = adbxd_hippo_c2_proteome$Protein,
+                         n_ids = lengths(strsplit(adbxd_hippo_c2_proteome$Protein, ",")),
+                         prefix = rep("", times = nrow(adbxd_hippo_c2_proteome)),
+                         uniprot = rep("", times = nrow(adbxd_hippo_c2_proteome)),
+                         id = rep("", times = nrow(adbxd_hippo_c2_proteome)),
+                         peptide = adbxd_hippo_c2_proteome$Peptide)
+adbxd_hippo_c2_proteome = as.matrix(adbxd_hippo_c2_proteome[,-1:-2])
+colnames(adbxd_hippo_c2_proteome) = gsub("\\.","_",colnames(adbxd_hippo_c2_proteome))
+row.names(adbxd_hippo_c2_proteome) = row.names(adbxd_hippo_c2_annot)
+
+adbxd_hippo_c2_sampanno = adbxd_hippo_c2_sampanno[colnames(adbxd_hippo_c2_proteome),]
+
+for (i in 1:nrow(adbxd_hippo_c2_annot)) {
+  protein_ids_i = unlist(strsplit(adbxd_hippo_c2_annot[i,"protein_id"],","))
+  for (j in 1:adbxd_hippo_c2_annot[i,"n_ids"]) {
+    if (j == 1) {
+      prefix_i = gsub("^\\s+(.*)\\|(.*)\\|(.*)$","\\1",protein_ids_i[j])
+      uniprot_i = gsub("^\\s+(.*)\\|(.*)\\|(.*)$","\\2",protein_ids_i[j])
+      id_i = gsub("^\\s+(.*)\\|(.*)\\|(.*)$","\\3",protein_ids_i[j])
+    } else {
+      prefix_i = c(prefix_i, gsub("^\\s+(.*)\\|(.*)\\|(.*)$","\\1",protein_ids_i[j]))
+      uniprot_i = c(uniprot_i, gsub("^\\s+(.*)\\|(.*)\\|(.*)$","\\2",protein_ids_i[j]))
+      id_i = c(id_i, gsub("^\\s+(.*)\\|(.*)\\|(.*)$","\\3",protein_ids_i[j]))
+    }
+  }
+  adbxd_hippo_c2_annot[i,"prefix"] = paste(unique(prefix_i), sep = "", collapse = ";")
+  adbxd_hippo_c2_annot[i,"uniprot"] = paste(unique(uniprot_i), sep = "", collapse = ";")
+  adbxd_hippo_c2_annot[i,"id"] = paste(unique(id_i), sep = "", collapse = ";")
+}
+
+rm(list = c(ls(pattern = "i$"), 
+            ls(pattern = "j$")))
+```
+
+Saving initial wrangled C2 hippocampus data.
+
+```{r save_wrangled_c2_hippo_data}
+saveRDS(adbxd_hippo_c2_annot,"./data/adbxd_hippo_c2_proteome_annotation.RDS")
+saveRDS(adbxd_hippo_c2_proteome,"./data/adbxd_hippo_c2_proteome_data.RDS")
+```
+
+#### Loading Peptide-Level Data
+
+Next, wrangling raw peptide-level data before normalization and batch adjustment.
+
+```{r wrangle_peptide_data_hippo}
+adbxd_hippo_peptides_csv = paste0("./data/MouseAD_Saul-Hipp_CombinedLib-RefFASTA-20230404/","dat/MouAD_Hipp-CombinedChrLib_RefFASTA-raw.csv")
+adbxd_hippo_peptides_raw = read.csv(adbxd_hippo_peptides_csv, row.names = 1)
+
+adbxd_hippo_peptides_raw = as.matrix(adbxd_hippo_peptides_raw)
+colnames(adbxd_hippo_peptides_raw) = gsub("^(\\w{3,4})(\\d{2,3}.*$)","\\1_\\2",colnames(adbxd_hippo_peptides_raw))
+colnames(adbxd_hippo_peptides_raw) = gsub("\\.","_",colnames(adbxd_hippo_peptides_raw))
+colnames(adbxd_hippo_peptides_raw)[which(colnames(adbxd_hippo_peptides_raw) %in% c("MBR_07","MBR_08"))] = c("MBRH_07","MBRH_08")
+
+adbxd_hippo_annot_raw = data.frame(row.names = row.names(adbxd_hippo_peptides_raw),
+                                   Peptide = gsub("^(.*)@(.*)$","\\1",row.names(adbxd_hippo_peptides_raw)),
+                                   Protein = gsub("^(.*)@(.*)$","\\2",row.names(adbxd_hippo_peptides_raw)))
+
+adbxd_hippo_peptides_raw = adbxd_hippo_peptides_raw[,adbxd_hippo_sampanno$sample_id]
+```
+
+Saving these raw peptide-level data for hippocampus.
+
+```{r save_peptide_data_hippo}
+saveRDS(adbxd_hippo_peptides_raw, "./data/adbxd_hippo_peptides_raw.RDS")
+saveRDS(adbxd_hippo_annot_raw, "./data/adbxd_hippo_peptide_annot_raw.RDS")
+```
+
+### Genotypes of BXDs
+
+Next, getting [BXD genotypes](http://datafiles.genenetwork.org/download/GN600/BXD_Geno_2017.xlsx), converting them to a format appopriate for GEMMA, and adding liftover to GRCm39 coordinate space using a [chain file from the UCSC Genome Browser](https://hgdownload.soe.ucsc.edu/goldenPath/mm10/liftOver/mm10ToMm39.over.chain.gz). The genetic differences are derived from what the Williams Lab called a "mixture mapping algorithm", discussed in detail in their preprint [@ashbrook_expanded_2019].
+
+```{r bxd_genotypes}
+library("readxl")
+bxd_geno_data = as.data.frame(read_excel("./data/raw/BXD_Geno_2017.xlsx", 
+                                         skip = 20, guess_max = 10000))
+row.names(bxd_geno_data) = bxd_geno_data$Locus
+bxd_geno_meta = bxd_geno_data[,1:5]
+bxd_geno_data = bxd_geno_data[,-1:-5]
+
+# Coercing genotypes to numeric matrix
+bxd_B = which(bxd_geno_data == "B", arr.ind = TRUE)
+bxd_H = which(bxd_geno_data == "H", arr.ind = TRUE)
+bxd_D = which(bxd_geno_data == "D", arr.ind = TRUE)
+bxd_geno_data[bxd_B] = rep(0,   times = nrow(bxd_B))
+bxd_geno_data[bxd_H] = rep(0.5, times = nrow(bxd_H))
+bxd_geno_data[bxd_D] = rep(1,   times = nrow(bxd_D))
+
+for (i in 1:ncol(bxd_geno_data)) {
+  bxd_geno_data[,i] = as.numeric(bxd_geno_data[,i])
+}
+bxd_geno_data = as.matrix(bxd_geno_data)
+```
+
+Lifting over the coordinates to GRCm39.
+
+```{r sampanno_grcm39_liftover}
+library("rtracklayer")
+library("liftOver")
+
+bxd_geno_granges_mm10 = GRanges(seqnames = paste0("chr",bxd_geno_meta$Chr), ranges = IRanges(start = bxd_geno_meta$Mb_mm10 * 1e6, width = 1))
+names(bxd_geno_granges_mm10) = bxd_geno_meta$Locus
+
+mm10_to_mm39_chain = import.chain("./data/raw/mm10ToMm39.over.chain")
+bxd_geno_granges_mm39 = unlist(liftOver(bxd_geno_granges_mm10,
+                                        chain = mm10_to_mm39_chain))
+bxd_geno_meta$Mb_mm39 = as.data.frame(bxd_geno_granges_mm39)[row.names(bxd_geno_meta),"start"] / 1e6
+mm10_col = grep("Mb_mm10",colnames(bxd_geno_meta))
+bxd_geno_meta = bxd_geno_meta[,c(1:mm10_col, 
+                                 grep("Mb_mm39", colnames(bxd_geno_meta)),
+                                 grep("cM_BXD", colnames(bxd_geno_meta)))]
+```
+
+Saving genotype data and sampanno.
+
+```{r save_bxd_genotype}
+saveRDS(bxd_geno_data,"./data/bxd_geno_data.RDS")
+saveRDS(bxd_geno_meta,"./data/bxd_geno_meta.RDS")
+```
+
+## QC Peptides
+
+Received QC peptides on 2023-03-24. Wrangling these. Starting by reading them in and changing their column IDs.
+
+```{r get_qc_peptides}
+adbxd_hippo_qc_peptides = read.csv("./data/out/MouAD_Hipp-ADBXD_Peptide-BatchAdj.csv")
+
+# Making a peptide annotation table and a peptides matrix
+row.names(adbxd_hippo_qc_peptides) = gsub(" @ ", ";", adbxd_hippo_qc_peptides$X)
+colnames(adbxd_hippo_qc_peptides) = gsub("\\.", "-", colnames(adbxd_hippo_qc_peptides))
+adbxd_hippo_qc_peptides = adbxd_hippo_qc_peptides[,-1]
+
+# Getting a sample key
+adbxd_hippo_sampkey = adbxd_hippo_sampanno[,c("sample_id","original_sample_id")]
+row.names(adbxd_hippo_sampkey) = adbxd_hippo_sampkey$original_sample_id
+
+# Changing column names
+adbxd_hippo_qc_peptides = adbxd_hippo_qc_peptides[,row.names(adbxd_hippo_sampkey)]
+colnames(adbxd_hippo_qc_peptides) = adbxd_hippo_sampkey$sample_id
+
+# Coercing to matrix
+adbxd_hippo_qc_peptides = as.matrix(adbxd_hippo_qc_peptides)
+```
+
+Plotting the normalized "Swedish mutation" peptide.
+
+```{r}
+swedish_peptide = "TEEISEVNLDAEFR"
+swedish_rowname = grep(swedish_peptide, row.names(adbxd_hippo_qc_peptides), value = TRUE)
+
+swedish_df = adbxd_hippo_sampanno[,c("sample_id","genotype","age","sex","contract")]
+swedish_df$swedish_peptide = adbxd_hippo_qc_peptides[grep(swedish_peptide,row.names(adbxd_hippo_qc_peptides)) ,adbxd_hippo_sampanno$sample_id]
+
+library("ggbeeswarm")
+ggplot(data = swedish_df[which(!is.na(swedish_df$age)),],
+       aes(x = genotype, y = swedish_peptide, color = genotype)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_beeswarm(size = 0.5) +
+  scale_color_manual(values = c("#CC3333","#444455")) +
+  facet_grid(age + contract ~ sex) +
+  theme_bw() +
+  ylab(paste0("Swedish Peptide (", swedish_peptide, ")")) +
+  theme(panel.grid = element_line(color = "#FFFFFF"))
+```
+
+```{r}
+adbxd_genotype_samples = adbxd_hippo_sampanno$sample_id[which(adbxd_hippo_sampanno$genotype %in% c("5xFAD", "Ntg"))]
+A4_rows = row.names(adbxd_hippo_qc_peptides)[grep("\\|A4$", row.names(adbxd_hippo_qc_peptides))]
+PSN1_rows = row.names(adbxd_hippo_qc_peptides)[grep("\\|PSN1$", row.names(adbxd_hippo_qc_peptides))]
+
+library("randomForest")
+rf_data = as.data.frame(t(adbxd_hippo_qc_peptides[c(A4_rows, PSN1_rows),adbxd_genotype_samples]))
+colnames(rf_data) = gsub("^(.*);.*$","\\1",colnames(rf_data))
+colnames(rf_data) = gsub("\\[\\+57\\]","_57_",colnames(rf_data))
+rf_data$genotype = as.factor(adbxd_hippo_sampanno[adbxd_genotype_samples,"genotype"])
+rf_data_imputed = rfImpute(genotype ~ ., data = rf_data, iter = 6)
+rf_genotype = randomForest(genotype ~ ., data = rf_data_imputed, proximity = TRUE)
+rf_genotype
+```
+
+```{r}
+library("ggrepel")
+rf_genotype_distance = as.dist(1 - rf_genotype$proximity)
+rf_genotype_mds = cmdscale(rf_genotype_distance, eig=TRUE, x.ret=TRUE)
+rf_genotype_mds_df = as.data.frame(rf_genotype_mds$points)
+colnames(rf_genotype_mds_df) = c("MD1","MD2")
+rf_genotype_mds_df = cbind(adbxd_hippo_sampanno[,c("sample_id","genotype","age","sex","contract")],
+                           rf_genotype_mds_df[row.names(adbxd_hippo_sampanno),]) |>
+  mutate(misgenotyped = ifelse((MD1 > 0 & genotype == "Ntg") | (MD1 < 0 & genotype == "5xFAD"),
+                               sample_id, NA))
+ggplot(data = rf_genotype_mds_df[which(!is.na(rf_genotype_mds_df$genotype)),],
+       aes(x = MD1, y = MD2, color = genotype, label = misgenotyped)) +
+  geom_point() +
+  geom_label_repel() +
+  scale_color_manual(name = "Called Genotype",
+                     values = c("#CC3333","#444455")) +
+  theme_bw() +
+  theme(panel.grid = element_line(color = "#FFFFFF")) +
+  ggtitle("Misgenotyping at 5xFAD is rare in the AD-BXD hippocampus samples")
+
+```
+
+Only one sample, `HC2_23`, is misgenotyped for 5xFAD.
+
+Now working on BXD genotypes. Getting all genes in the peptides dataset.
+
+```{r}
+adbxd_hippo_peptides_annot = data.frame(row.names = row.names(adbxd_hippo_qc_peptides),
+                                        peptide = gsub("^(.*);\\w+\\|.*\\|.*$","\\1",row.names(adbxd_hippo_qc_peptides)),
+                                        source  = gsub("^.*;(\\w+)\\|.*\\|.*$","\\1",row.names(adbxd_hippo_qc_peptides)),
+                                        uniprot = gsub("^.*;\\w+\\|(.*)\\|.*$","\\1",row.names(adbxd_hippo_qc_peptides)),
+                                        protein = gsub("^.*;\\w+\\|.*\\|(.*)$","\\1",row.names(adbxd_hippo_qc_peptides)))
+adbxd_peptides_not_in_mm_uniprot = read.table("./data/ADBXD_peptides_not_in_mm_uniprot.tsv",
+                                              header = TRUE, sep = "\t")
+
+adbxd_hippo_peptides_annot_d2_unique = adbxd_hippo_peptides_annot[which(adbxd_hippo_peptides_annot$peptide %in% adbxd_peptides_not_in_mm_uniprot$digest),]
+```
+
+Saving QC matrix
+
+```{r save_qc_matrix}
+saveRDS(adbxd_hippo_qc_peptides, "./data/adbxd_hippo_qc_peptides.RDS")
+```
+
+### Next Steps
+
+Next is [basic data visualization, normalization, and batch adjustment](101_normalization_batch_adjustment.html).
